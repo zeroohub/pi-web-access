@@ -54,6 +54,30 @@ test("Firecrawl extraction maps markdown, uses credentials, and defaults to lock
 	assert.deepEqual(output.result, { url: "https://example.com/article", title: "Title", content: "# Body", error: null });
 });
 
+test("explicit follow allows a Firecrawl-only extraction route", async () => {
+	const home = await configHome({
+		fetchContent: { redirects: "follow" },
+		fetchRouting: { providers: ["firecrawl"], allowRemoteHostedProviders: true },
+		firecrawlBaseUrl: "https://crawl.example.com",
+	});
+	const child = runChild(`
+		const calls = [];
+		globalThis.fetch = async (url) => {
+			calls.push(String(url));
+			if (String(url) === "https://example.com/article") return new Response("blocked", {status: 403});
+			return Response.json({success: true, data: {markdown: "# Extracted", metadata: {title: "Firecrawl"}}});
+		};
+		const {extractContent} = await import(${JSON.stringify(extractModuleUrl)});
+		const result = await extractContent("https://example.com/article", undefined, {lookup: ${PUBLIC_LOOKUP}});
+		console.log(JSON.stringify({calls, result}));
+	`, {PI_CODING_AGENT_DIR: home});
+	assert.equal(child.status, 0, child.stderr);
+	const output = JSON.parse(child.stdout.trim());
+	assert.equal(output.result.error, null);
+	assert.equal(output.result.title, "Firecrawl");
+	assert.deepEqual(output.calls, ["https://example.com/article", "https://crawl.example.com/v2/scrape"]);
+});
+
 test("Firecrawl search maps shared options and inline Markdown", async () => {
 	const child = runChild(`
 		let captured = null;

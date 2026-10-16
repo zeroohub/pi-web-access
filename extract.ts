@@ -17,6 +17,7 @@ import { extractWithExa, hasExaApiKey } from "./exa.ts";
 import { extractWithSearch1API, isSearch1APIAvailable } from "./search1api.ts";
 import { extractWithQuerit, isQueritAvailable } from "./querit.ts";
 import { extractWithTabstack, isTabstackAvailable } from "./tabstack.ts";
+import { extractWithTavily, isTavilyAvailable } from "./tavily.ts";
 import { extractWithKagi, isKagiExtractAvailable } from "./kagi.ts";
 import { extractWithOllama, isOllamaFetchAvailable } from "./ollama.ts";
 import { extractWithFirecrawl, isFirecrawlAvailable } from "./firecrawl.ts";
@@ -24,7 +25,7 @@ import { extractWithCrawl4ai, isCrawl4aiAvailable } from "./crawl4ai.ts";
 import { extractWithBrightDataUnlocker, isBrightDataUnlockerAvailable } from "./brightdata-unlocker.ts";
 import { isVideoFile, extractVideo, extractVideoFrame, getLocalVideoDuration } from "./video-extract.ts";
 import { appendDeclaredWebLinks, discoverDeclaredWebLinks, type DeclaredWebLink } from "./declared-web-links.ts";
-import { fetchRemoteUrl, loadConfiguredFetchContentUserAgent, loadFetchContentCurl, loadFetchContentDomainPolicy, loadFetchContentRedirectPolicy, loadFetchContentUserAgent, loadSsrfConfig, trustedEnvProxyFor, validateRemoteUrl, type DomainPolicy, type Lookup, type RedirectPolicy, type SsrfConfig } from "./ssrf-protection.ts";
+import { fetchRemoteUrl, loadConfiguredFetchContentUserAgent, loadFetchContentCurl, loadFetchContentDomainPolicy, resolveFetchContentRedirectPolicy, loadFetchContentUserAgent, loadSsrfConfig, trustedEnvProxyFor, validateRemoteUrl, type DomainPolicy, type Lookup, type RedirectPolicy, type SsrfConfig } from "./ssrf-protection.ts";
 import { createCurlFetch, formatSeconds, getWebSearchConfigPath, type ProxiedRequestInit } from "./utils.ts";
 import { isImageEnabled } from "./feature-config.ts";
 import { assertAuthFetchUrl, authFetchRedirectGuard, type AuthFetchProfile } from "./auth-fetch.ts";
@@ -68,14 +69,14 @@ function loadFetchTimeoutMs(): number {
 	return Math.max(1, timeoutMs);
 }
 
-const NON_RECOVERABLE_ERRORS = ["Unsupported content type", "Response too large", "PDF extraction is disabled", "Image fetching is disabled", "fetchContent.curl command not found"];
+const NON_RECOVERABLE_ERRORS = ["Unsupported content type", "Response too large", "PDF extraction is disabled", "Image fetching is disabled", "fetchContent.curl command not found", "PDF provider paddleocr failed:", "PaddleOCR credential resolution failed:"];
 const MIN_USEFUL_CONTENT = 500;
 const SUPPORTED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
-const FETCH_PROVIDERS = ["http", "firecrawl", "crawl4ai", "jina", "tinyfish", "search1api", "querit", "kagi", "ollama", "parallel", "parallel-mcp", "brightdata", "gemini", "deepseek", "exa", "tabstack"] as const;
+const FETCH_PROVIDERS = ["http", "firecrawl", "crawl4ai", "jina", "tinyfish", "search1api", "querit", "kagi", "ollama", "parallel", "parallel-mcp", "brightdata", "gemini", "deepseek", "exa", "tabstack", "tavily"] as const;
 type FetchProvider = typeof FETCH_PROVIDERS[number];
 type FetchRouting = { providers: FetchProvider[]; allowRemoteHostedProviders: boolean };
 const DEFAULT_FETCH_PROVIDER_ORDER: FetchProvider[] = ["http", "firecrawl", "crawl4ai", "jina", "tinyfish", "search1api", "querit", "kagi", "ollama", "parallel", "brightdata", "gemini"];
-const REMOTE_HOSTED_FETCH_PROVIDERS = new Set<FetchProvider>(["jina", "tinyfish", "search1api", "querit", "kagi", "ollama", "parallel", "parallel-mcp", "brightdata", "gemini", "deepseek", "exa", "tabstack"]);
+const REMOTE_HOSTED_FETCH_PROVIDERS = new Set<FetchProvider>(["jina", "tinyfish", "search1api", "querit", "kagi", "ollama", "parallel", "parallel-mcp", "brightdata", "gemini", "deepseek", "exa", "tabstack", "tavily"]);
 
 function isDefuddleConsoleError(args: Parameters<typeof console.error>): boolean {
 	const prefix = args[0];
@@ -86,10 +87,14 @@ async function extractWithDefuddle(text: string, url: string): Promise<{ title: 
 	const { Defuddle } = await import("defuddle/node");
 	const { parseHTML } = await import("linkedom");
 	const { document } = parseHTML(text);
-	Object.defineProperty(document, "location", {
-		value: new URL(url),
-		configurable: true,
-	});
+	try {
+		Object.defineProperty(document, "location", {
+			value: new URL(url),
+			configurable: true,
+		});
+	} catch {
+		return null;
+	}
 	let processingError: unknown;
 	const originalConsoleError = console.error;
 	console.error = (...args) => {
@@ -107,6 +112,7 @@ async function extractWithDefuddle(text: string, url: string): Promise<{ title: 
 		// With useAsync:false, Defuddle parses synchronously before returning its promise.
 		// Keep the console interception limited to that call so unrelated Pi output is
 		// never routed through this fallback's handler.
+		// SAFETY: linkedom supplies the DOM document interface used by Defuddle.
 		resultPromise = Defuddle(document as unknown as Document, url, { markdown: true, useAsync: false });
 	} finally {
 		console.error = originalConsoleError;
@@ -385,8 +391,8 @@ export interface ExtractOptions {
 	rejectDirectImages?: string;
 	/** Custom DNS resolver used for SSRF validation. Primarily a test seam. */
 	lookup?: Lookup;
-	/** "same-origin" refuses cross-origin redirects and extraction paths whose redirect
-	 * chain cannot be observed. fetchContent.redirects in config is a floor. */
+	/** "follow" permits normal redirects and hosted extraction; "same-origin" restricts
+	 * both. A configured same-origin policy cannot be weakened per call. */
 	redirects?: RedirectPolicy;
 }
 
@@ -558,7 +564,7 @@ export async function extractContent(
 
 	let redirectPolicy: RedirectPolicy | undefined;
 	try {
-		redirectPolicy = options?.redirects ?? loadFetchContentRedirectPolicy();
+		redirectPolicy = resolveFetchContentRedirectPolicy(options?.redirects);
 	} catch (err) {
 		return { url, title: "", content: "", error: errorMessage(err) };
 	}
@@ -567,6 +573,8 @@ export async function extractContent(
 		const parsed = new URL(url);
 		if (parsed.protocol === "http:" || parsed.protocol === "https:") remoteUrl = parsed;
 	} catch {
+		// Local paths are handled below without remote URL validation.
+		remoteUrl = null;
 	}
 	if (remoteUrl) {
 		try {
@@ -595,7 +603,7 @@ export async function extractContent(
 		}
 	}
 
-	if (redirectPolicy) {
+	if (redirectPolicy === "same-origin") {
 		if (parseGitHubIssuePrUrl(url)) return redirectPolicyRouteRefusal(url, "GitHub issue/PR");
 		if (parseGitHubUrl(url)) return redirectPolicyRouteRefusal(url, "GitHub repository");
 		if (isYouTubeURL(url).isYouTube) return redirectPolicyRouteRefusal(url, "YouTube");
@@ -827,10 +835,10 @@ export async function extractContent(
 	} catch (err) {
 		return { url, title: "", content: "", error: errorMessage(err) };
 	}
-	if (redirectPolicy && !fetchRouting.providers.includes("http")) {
+	if (redirectPolicy === "same-origin" && !fetchRouting.providers.includes("http")) {
 		return redirectPolicyRouteRefusal(url, fetchRouting.providers[0]!);
 	}
-	const providerOrder: FetchProvider[] = redirectPolicy
+	const providerOrder: FetchProvider[] = redirectPolicy === "same-origin"
 		? ["http"]
 		: remoteUrl && !fetchRouting.allowRemoteHostedProviders
 			? fetchRouting.providers.filter(provider => !REMOTE_HOSTED_FETCH_PROVIDERS.has(provider))
@@ -871,6 +879,7 @@ export async function extractContent(
 	let search1apiError: string | null = null;
 	let queritError: string | null = null;
 	let tabstackError: string | null = null;
+	let tavilyError: string | null = null;
 	let kagiError: string | null = null;
 	let ollamaError: string | null = null;
 	let parallelError: string | null = null;
@@ -989,6 +998,20 @@ export async function extractContent(
 				if (isAbortError(err)) return abortedResult(url);
 				tabstackError = errorMessage(err);
 				if (isConfigParseError(err)) return parseErrorResult(tabstackError);
+			}
+			continue;
+		}
+
+		if (provider === "tavily") {
+			try {
+				if (isTavilyAvailable()) {
+					const result = await extractWithTavily(url, signal, { ...options, timeoutMs: fetchTimeoutMs });
+					if (result) return withDeclaredLinks(result);
+				}
+			} catch (err) {
+				if (isAbortError(err)) return abortedResult(url);
+				tavilyError = errorMessage(err);
+				if (err instanceof CredentialResolutionError || isConfigParseError(err)) return parseErrorResult(tavilyError);
 			}
 			continue;
 		}
@@ -1136,7 +1159,7 @@ export async function extractContent(
 		return { ...finalHttpResult, error: notFoundGuidance(finalHttpResult, options?.toolNames) };
 	}
 	// Under the redirect policy no other provider may run, so provider setup hints do not apply.
-	if (redirectPolicy && finalHttpResult) return finalHttpResult;
+	if (redirectPolicy === "same-origin" && finalHttpResult) return finalHttpResult;
 
 	const searchToolName = options?.toolNames?.webSearch;
 	const jinaHint = jinaReaderGuidance(fetchRouting, providerOrder, Boolean(remoteUrl) && !fetchRouting.allowRemoteHostedProviders);
@@ -1147,6 +1170,7 @@ export async function extractContent(
 		...(tinyfishError ? [`TinyFish fallback failed: ${tinyfishError}`] : []),
 		...(search1apiError ? [`Search1API fallback failed: ${search1apiError}`] : []),
 		...(queritError ? [`Querit fallback failed: ${queritError}`] : []),
+		...(tavilyError ? [`Tavily fallback failed: ${tavilyError}`] : []),
 		...(kagiError ? [`Kagi fallback failed: ${kagiError}`] : []),
 		...(ollamaError ? [`Ollama fallback failed: ${ollamaError}`] : []),
 		...(parallelError ? [`Parallel fallback failed: ${parallelError}`] : []),
@@ -1324,7 +1348,7 @@ async function extractViaHttp(
 	try {
 		const ssrf = loadSsrfConfig();
 		const domainPolicy = loadFetchContentDomainPolicy();
-		const redirects = options?.redirects ?? loadFetchContentRedirectPolicy();
+		const redirects = resolveFetchContentRedirectPolicy(options?.redirects);
 		const authProfile = options?.authFetchProfile;
 		// Auth fetches keep Node's fetch, so browser cookies never appear in a command line.
 		const curl = authProfile ? null : loadFetchContentCurl();
@@ -1362,7 +1386,7 @@ async function extractViaHttp(
 							// The type, and so the exact limit, is known only after the response; the size checks below still apply.
 							// curl rejects a fractional --max-filesize, and pdf.maxSizeMB may be fractional.
 							maxBytes: Math.floor(Math.max(5, loadPDFConfig().maxSizeMB) * 1024 * 1024),
-							envProxy: (target) => trustedEnvProxyFor(target, ssrf.trustEnvProxy),
+							envProxy: (target: URL) => trustedEnvProxyFor(target, ssrf.trustEnvProxy),
 						}),
 					} : {}),
 				},
@@ -1452,7 +1476,7 @@ async function extractViaHttp(
 			try {
 				const buffer = await readPDFResponseBuffer(response, pdfConfig.maxSizeMB);
 				if (signal?.aborted) return abortedResult(url);
-				const result = await extractPDFToMarkdown(buffer, url, { signal });
+				const result = await extractPDFToMarkdown(buffer, url, { signal, lookup: options?.lookup });
 				activityMonitor.logComplete(activityId, response.status);
 				return {
 					url,
@@ -1470,6 +1494,9 @@ async function extractViaHttp(
 				}
 				if (err instanceof CredentialResolutionError || isConfigParseError(err)) {
 					return { url, title: "", content: "", error: message };
+				}
+				if (pdfConfig.provider === "paddleocr") {
+					return { url, title: "", content: "", error: `PDF provider paddleocr failed: ${message}` };
 				}
 				return { url, title: "", content: "", error: `PDF extraction failed: ${message}` };
 			}
@@ -1524,11 +1551,13 @@ async function extractViaHttp(
 		const { document } = parseHTML(text);
 		const documentTitle = document.title?.trim() ?? "";
 		const declaredLinks = discoverDeclaredWebLinks(
+			// SAFETY: linkedom implements the DOM queries used for discovery.
 			document as unknown as Document,
 			response.headers.get("link"),
 			response.url || url,
 		);
 		const { Readability } = await import("@mozilla/readability");
+		// SAFETY: linkedom implements the DOM document interface used by Readability.
 		const reader = new Readability(document as unknown as Document);
 		const article = reader.parse();
 
@@ -1664,7 +1693,13 @@ export function extractHeadingTitle(text: string): string | null {
 }
 
 function extractTextTitle(text: string, url: string): string {
-	return extractHeadingTitle(text) ?? (new URL(url).pathname.split("/").pop() || url);
+	const heading = extractHeadingTitle(text);
+	if (heading) return heading;
+	try {
+		return new URL(url).pathname.split("/").pop() || url;
+	} catch {
+		return url;
+	}
 }
 
 export async function fetchAllContent(

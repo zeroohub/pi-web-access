@@ -2047,8 +2047,8 @@ export default function (pi: ExtensionAPI) {
 				description: "authFetch profile name, or true for the only one",
 			})),
 			proxy: Type.Optional(Type.String({ description: "Proxy URL; omit by default; \"\" forces direct" })),
-			redirects: Type.Optional(StringEnum(["same-origin"], {
-				description: "Refuse cross-origin redirects",
+			redirects: Type.Optional(StringEnum(["follow", "same-origin"], {
+				description: "Follow redirects or restrict to same-origin; configured restrictions cannot be weakened",
 			})),
 		}),
 		outputSchema: fetchContentOutputSchema,
@@ -2330,7 +2330,6 @@ export default function (pi: ExtensionAPI) {
 			const availableProviders = bootstrap.availableProviders;
 			const initialProvider = bootstrap.defaultProvider;
 			const curatorTimeoutSeconds = bootstrap.timeoutSeconds;
-			let currentProvider: SearchProvider = initialProvider;
 			const commandConfig = loadConfig();
 			const rawSearchProvider = normalizeProviderInput(
 				commandConfig.searchProvider ?? commandConfig.provider ?? "auto",
@@ -2442,7 +2441,6 @@ export default function (pi: ExtensionAPI) {
 							if (commandHandle && !isCommandActive()) return;
 							const normalized = normalizeProviderInput(provider);
 							if (!normalized || normalized === "auto" || Array.isArray(normalized)) return;
-							currentProvider = normalized;
 							currentSearchProvider = normalized;
 							try {
 								saveConfig({ provider: normalized });

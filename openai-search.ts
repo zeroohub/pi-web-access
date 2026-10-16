@@ -43,6 +43,7 @@ interface WebSearchConfig {
 	openaiUseProviderBaseUrl?: unknown;
 	openaiUseAlphaSearch?: unknown;
 	openaiSearchModel?: unknown;
+	openaiSearchThinkingLevel?: unknown;
 	openaiSearchProviders?: unknown;
 }
 
@@ -60,6 +61,7 @@ interface OpenAIAuth {
 	responsesUrl: string;
 	useCodexEndpoint?: boolean;
 	useProviderBaseUrl?: boolean;
+	thinkingModel?: Pick<CurrentModel, "reasoning" | "thinkingLevelMap">;
 }
 
 type CurrentModel = NonNullable<ExtensionContext["model"]>;
@@ -332,6 +334,7 @@ async function resolvePiAuth(ctx: ExtensionContext, responsesUrl: string, provid
 			provider,
 			apiKey: resolved.apiKey,
 			model: modelOverride ?? preferred.id,
+			thinkingModel: models.find((model) => model.provider === provider && model.id === (modelOverride ?? preferred.id)),
 			headers: resolved.headers ?? {},
 			responsesUrl: providerResponsesUrl,
 			useCodexEndpoint,
@@ -368,9 +371,18 @@ export async function resolveOpenAIAuth(ctx?: ExtensionContext, signal?: AbortSi
 		environmentValue: process.env.OPENAI_API_KEY,
 		signal,
 	});
-	return apiKey
-		? { provider: "openai", apiKey, model: modelOverride ?? "gpt-6-luna", headers: {}, responsesUrl }
-		: undefined;
+	if (!apiKey) return undefined;
+	const model = modelOverride ?? "gpt-6-luna";
+	let thinkingModel: OpenAIAuth["thinkingModel"];
+	if (ctx) {
+		try {
+			thinkingModel = ctx.modelRegistry.getAll().find((entry) => entry.provider === "openai" && entry.id === model);
+		} catch {
+			// Standalone credentials remain usable without registry metadata.
+			thinkingModel = undefined;
+		}
+	}
+	return { provider: "openai", apiKey, model, headers: {}, responsesUrl, thinkingModel };
 }
 
 export async function isOpenAISearchAvailable(ctx?: ExtensionContext): Promise<boolean> {
@@ -399,7 +411,7 @@ async function resolveCurrentModelAuth(ctx: ExtensionContext, signal?: AbortSign
 	}
 	const resolved = await ctx.modelRegistry.getApiKeyAndHeaders(model);
 	if (signal?.aborted) signal.throwIfAborted();
-	if (!resolved.ok) throw new Error(`OpenAI current model authentication failed: ${resolved.error}`);
+	if (resolved.ok === false) throw new Error(`OpenAI current model authentication failed: ${resolved.error}`);
 	if (!resolved.apiKey) throw new Error("OpenAI current model authentication failed: API key unavailable");
 	// Resolve the destination together with credentials; auth may override baseUrl.
 	const target = resolveCurrentModelSearchTarget({ ...model, baseUrl: resolved.baseUrl ?? model.baseUrl });
@@ -407,6 +419,7 @@ async function resolveCurrentModelAuth(ctx: ExtensionContext, signal?: AbortSign
 		provider: "openai",
 		apiKey: resolved.apiKey,
 		model: model.id,
+		thinkingModel: model,
 		headers: resolved.headers ?? {},
 		responsesUrl: target.responsesUrl,
 		useCodexEndpoint: target.useCodexEndpoint,
@@ -519,6 +532,8 @@ async function parseOpenAIResponse(response: Response): Promise<ParsedOpenAIResp
 				}
 			}
 		} catch {
+			// Ignore non-JSON SSE lines; terminal events are handled above.
+			continue;
 		}
 	}
 
@@ -647,7 +662,12 @@ function isAlphaSearchEnabled(): boolean {
 }
 
 function resolveAlphaSearchUrl(responsesUrl: string): string {
-	const url = new URL(responsesUrl);
+	let url: URL;
+	try {
+		url = new URL(responsesUrl);
+	} catch {
+		throw new Error("OpenAI alpha/search configuration: endpoint must be an absolute URL");
+	}
 	const pathname = url.pathname.replace(/\/+$/u, "");
 	if (!pathname.endsWith("/responses")) {
 		throw new Error("OpenAI alpha/search configuration: endpoint path must end with /responses");
@@ -723,6 +743,24 @@ async function parseAlphaSearchResponse(response: Response, numResults = 5): Pro
 	};
 }
 
+function resolveSearchReasoning(auth: OpenAIAuth): { effort: string } | undefined {
+	const level = loadConfig().openaiSearchThinkingLevel;
+	if (level === undefined) return undefined;
+	const defaults: Record<string, string> = { off: "none", minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh" };
+	if (typeof level !== "string" || ![...Object.keys(defaults), "max"].includes(level)) {
+		throw new Error(`openaiSearchThinkingLevel in ${CONFIG_PATH} must be off, minimal, low, medium, high, xhigh, or max`);
+	}
+	const model = auth.thinkingModel;
+	const mapped = model?.thinkingLevelMap?.[level as keyof NonNullable<CurrentModel["thinkingLevelMap"]>];
+	if (mapped === null || (model?.reasoning === false && level !== "off") ||
+		(model && (level === "xhigh" || level === "max") && mapped === undefined)) {
+		throw new Error(`OpenAI search model ${auth.model} does not support thinking level ${level}`);
+	}
+	const effort = mapped ?? defaults[level];
+	if (!effort) throw new Error(`OpenAI search thinking level ${level} requires a model thinkingLevelMap entry`);
+	return { effort };
+}
+
 async function runOpenAISearch(
 	query: string,
 	options: SearchOptions,
@@ -740,6 +778,7 @@ async function runOpenAISearch(
 	const requestUrl = useAlphaSearch ? resolveAlphaSearchUrl(responsesUrl) : responsesUrl;
 	const body = useAlphaSearch ? buildAlphaSearchBody(query, options, auth.model) : {
 		model: auth.model,
+		reasoning: resolveSearchReasoning(auth),
 		instructions: buildInstructions(options),
 		input: [{ role: "user", content: [{ type: "input_text", text: query }] }],
 		tools: [buildWebSearchTool(options)],

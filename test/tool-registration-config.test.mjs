@@ -10,7 +10,6 @@ import { Value } from "typebox/value";
 import initializeExtension from "../index.ts";
 
 const indexUrl = new URL("../index.ts", import.meta.url).href;
-const indexSrc = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
 const readmeSrc = readFileSync(new URL("../README.md", import.meta.url), "utf8");
 
 function runRegistration(config) {
@@ -134,10 +133,11 @@ test("fetch_content schema exposes auth profile opt-in", () => {
 	assert.deepEqual(schema.anyOf.map(option => option.type), ["string", "boolean"]);
 });
 
-test("fetch_content schema offers only the same-origin redirect policy", () => {
+test("fetch_content schema offers follow and same-origin redirect policies", () => {
 	const schema = registeredTool({}, "fetch_content").parameters.properties.redirects;
 	assert.equal(Value.Check(schema, "same-origin"), true);
-	assert.equal(Value.Check(schema, "follow"), false);
+	assert.equal(Value.Check(schema, "follow"), true);
+	assert.equal(Value.Check(schema, "allow"), false);
 });
 
 test("registered tools do not advertise disabled get_search_content", () => {
