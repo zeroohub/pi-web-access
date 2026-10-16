@@ -1,14 +1,14 @@
-// A real, one-page PDF generated locally; no fixture downloads or PDF dependencies.
-export function makePdf(text) {
+// Real PDFs generated locally; no fixture downloads or PDF dependencies.
+export function makePdf(text, pageCount = 1) {
 	const lines = text.split("\n").flatMap(line => line.match(/.{1,60}/g) ?? [""]);
 	const commands = lines.map(line => `(${line.replace(/[\\()]/g, "\\$&")}) Tj T*`);
 	const stream = `BT /F1 12 Tf 14 TL 72 720 Td ${commands.join(" ")} ET`;
 	const objects = [
 		"<< /Type /Catalog /Pages 2 0 R >>",
-		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+		`<< /Type /Pages /Kids [${Array.from({length: pageCount}, (_, i) => `${i + 5} 0 R`).join(" ")}] /Count ${pageCount} >>`,
 		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
 		`<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`,
+		...Array.from({length: pageCount}, () => "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 4 0 R >>"),
 	];
 	let body = "%PDF-1.4\n";
 	const offsets = [];

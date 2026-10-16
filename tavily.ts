@@ -1,7 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { activityMonitor } from "./activity.ts";
 import { normalizeDomain } from "./domain-filter-normalization.ts";
-import type { ExtractedContent } from "./extract.ts";
+import type { ExtractedContent, ExtractOptions } from "./extract.ts";
+import { loadFetchContentDomainPolicy, loadSsrfConfig, validateRemoteUrl } from "./ssrf-protection.ts";
 import type { SearchOptions, SearchResponse } from "./perplexity.ts";
 import { normalizeSearchResultCount } from "./search-result-count-normalization.ts";
 import { hasCredentialSource, redactCredential, resolveCredential } from "./credential-source.ts";
@@ -73,14 +74,14 @@ function tavilyKeyPool(): string[] {
 	return [...new Set([...slots.slice(start), ...slots.slice(0, start)].map(([, key]) => key))];
 }
 
-function getApiUrl(): string {
+function getApiUrl(endpoint: "search" | "extract" = "search"): string {
 	return `${resolveApiBaseUrl({
 		configKey: "tavilyBaseUrl",
 		configuredValue: loadConfig().tavilyBaseUrl,
 		defaultValue: TAVILY_API_BASE_URL,
 		environmentKey: "TAVILY_BASE_URL",
 		environmentValue: process.env.TAVILY_BASE_URL,
-	})}/search`;
+	})}/${endpoint}`;
 }
 
 async function requireApiKey(signal?: AbortSignal): Promise<string> {
@@ -112,8 +113,8 @@ function mapDomainFilter(domainFilter: string[] | undefined): { include_domains?
 	};
 }
 
-function requestSignal(signal?: AbortSignal): AbortSignal {
-	const timeout = AbortSignal.timeout(SEARCH_TIMEOUT_MS);
+function requestSignal(signal?: AbortSignal, timeoutMs = SEARCH_TIMEOUT_MS): AbortSignal {
+	const timeout = AbortSignal.timeout(timeoutMs);
 	return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
@@ -197,6 +198,34 @@ export async function searchWithTavily(query: string, options: TavilySearchOptio
 	return result;
 }
 
+export async function extractWithTavily(url: string, signal?: AbortSignal, options: ExtractOptions = {}): Promise<ExtractedContent | null> {
+	const requestAbort = requestSignal(signal, options.timeoutMs);
+	requestAbort.throwIfAborted();
+	const ssrf = loadSsrfConfig();
+	await validateRemoteUrl(url, {
+		allowRanges: ssrf.allowRanges,
+		trustEnvProxy: ssrf.trustEnvProxy,
+		domainPolicy: loadFetchContentDomainPolicy(),
+		...(options.lookup ? { lookup: options.lookup } : {}),
+	});
+	requestAbort.throwIfAborted();
+	const apiUrl = getApiUrl("extract");
+	const activityId = activityMonitor.logStart({ type: "fetch", url });
+	try {
+		const data = await requestWithKeyFailover(apiUrl, {
+			urls: [url], extract_depth: "basic", format: "markdown",
+		}, requestAbort);
+		const result = Array.isArray(data.results) ? data.results.find((item) => item?.url === url) : undefined;
+		activityMonitor.logComplete(activityId, 200);
+		if (!result || typeof result.raw_content !== "string" || !result.raw_content.trim()) return null;
+		return { url, title: typeof result.title === "string" ? result.title : "", content: result.raw_content, error: null };
+	} catch (err) {
+		if (requestAbort.aborted) activityMonitor.logComplete(activityId, 0);
+		else activityMonitor.logError(activityId, errorMessage(err));
+		throw err;
+	}
+}
+
 function tavilyErrorStatus(err: unknown): number {
 	return Number(errorMessage(err).match(/^Tavily API error (\d{3}):/)?.[1] ?? 0);
 }
@@ -206,6 +235,7 @@ async function requestWithKeyFailover(apiUrl: string, body: Record<string, unkno
 	const keys = pool.length > 0 ? pool : [await requireApiKey(signal)];
 	let fallbackChecked = pool.length === 0;
 	for (let i = 0; ; i++) {
+		signal.throwIfAborted();
 		try {
 			return await tavilyRequest(apiUrl, keys[i], body, signal);
 		} catch (err) {

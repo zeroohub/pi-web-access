@@ -66,7 +66,7 @@ export interface DomainPolicy {
 
 const DEFAULT_DOMAIN_POLICY: DomainPolicy = { allow: [], deny: [] };
 
-export type RedirectPolicy = "same-origin";
+export type RedirectPolicy = "follow" | "same-origin";
 
 function loadFetchContentConfig(): Record<string, unknown> | undefined {
 	const parsed = loadConfigRoot();
@@ -82,13 +82,19 @@ function loadFetchContentConfig(): Record<string, unknown> | undefined {
 export function loadFetchContentRedirectPolicy(): RedirectPolicy | undefined {
 	const redirects = loadFetchContentConfig()?.redirects;
 	if (redirects === undefined || redirects === null) return undefined;
-	if (redirects !== "same-origin") {
-		throw new Error(`fetchContent.redirects in ${WEB_SEARCH_CONFIG_PATH} must be "same-origin"`);
+	if (redirects !== "follow" && redirects !== "same-origin") {
+		throw new Error(`fetchContent.redirects in ${WEB_SEARCH_CONFIG_PATH} must be "follow" or "same-origin"`);
 	}
 	return redirects;
 }
 
 const DEFAULT_FETCH_CONTENT_USER_AGENT = "OpenAI File Downloader, XaiImageApiFetch/1.0";
+
+export function resolveFetchContentRedirectPolicy(requested?: RedirectPolicy): RedirectPolicy | undefined {
+	const configured = loadFetchContentRedirectPolicy();
+	if (configured === "same-origin" || requested === "same-origin") return "same-origin";
+	return requested ?? configured;
+}
 
 export function loadFetchContentUserAgent(): string {
 	const userAgent = loadFetchContentConfig()?.userAgent;

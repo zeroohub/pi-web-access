@@ -152,13 +152,13 @@ test("loadFetchContentRedirectPolicy is off unless fetchContent.redirects is set
 	assert.deepEqual(runLoadRedirectPolicy(envFor(set.root, set.agentDir)), { ok: true, policy: "same-origin" });
 });
 
-test("loadFetchContentRedirectPolicy rejects values other than same-origin", async () => {
-	for (const redirects of ["follow", "Same-Origin", true, { mode: "same-origin" }]) {
+test("loadFetchContentRedirectPolicy rejects values other than follow and same-origin", async () => {
+	for (const redirects of ["allow", "Same-Origin", true, { mode: "same-origin" }]) {
 		const { root, agentDir, configPath } = await makeConfigDir("pi-redirect-policy-invalid-");
 		await writeFile(configPath, JSON.stringify({ fetchContent: { redirects } }), "utf8");
 		const result = runLoadRedirectPolicy(envFor(root, agentDir));
 		assert.equal(result.ok, false, JSON.stringify(redirects));
-		assert.match(result.error, /fetchContent\.redirects in .*web-search\.json must be "same-origin"/);
+		assert.match(result.error, /fetchContent\.redirects in .*web-search\.json must be "follow" or "same-origin"/);
 	}
 });
 

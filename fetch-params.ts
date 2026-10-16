@@ -27,7 +27,7 @@ export interface NormalizedFetchContentParams {
 		answerModel?: string;
 		auth?: true | string;
 		proxy?: string;
-		redirects?: "same-origin";
+		redirects?: "follow" | "same-origin";
 	};
 }
 
@@ -88,10 +88,10 @@ function normalizeMode(value: unknown): "readable" | "raw" | "answer" | undefine
 	throw new Error('mode must be "readable", "raw", or "answer"');
 }
 
-function normalizeRedirects(value: unknown): "same-origin" | undefined {
+function normalizeRedirects(value: unknown): "follow" | "same-origin" | undefined {
 	if (value === undefined) return undefined;
-	if (value === "same-origin") return value;
-	throw new Error('redirects must be "same-origin"');
+	if (value === "follow" || value === "same-origin") return value;
+	throw new Error('redirects must be "follow" or "same-origin"');
 }
 
 function normalizeAuth(value: unknown): true | string | undefined {

@@ -124,6 +124,49 @@ test("config enablement refuses a cross-origin redirect without the per-call opt
 	assert.deepEqual(fetched, ["https://a.example/start"]);
 });
 
+for (const [name, config, options] of [
+	["per-call follow", undefined, { redirects: "follow" }],
+	["configured follow", { fetchContent: { redirects: "follow" } }, {}],
+]) {
+	test(`${name} permits cross-origin redirects`, async () => {
+		const { fetched, result } = await run({
+			config, options, url: "https://a.example/start",
+			routes: { "https://a.example/start": [302, "https://b.example/final"] },
+		});
+		assert.equal(result.error, null);
+		assert.deepEqual(fetched, ["https://a.example/start", "https://b.example/final"]);
+	});
+}
+
+test("per-call follow cannot weaken configured same-origin", async () => {
+	const { fetched, result } = await run({
+		config: { fetchContent: { redirects: "same-origin" } },
+		options: { redirects: "follow" }, url: "https://a.example/start",
+		routes: { "https://a.example/start": [302, "https://b.example/final"] },
+	});
+	assert.match(result.error, /Refused cross-origin redirect/);
+	assert.deepEqual(fetched, ["https://a.example/start"]);
+});
+
+test("configured follow still permits per-call same-origin restriction", async () => {
+	const { fetched, result } = await run({
+		config: { fetchContent: { redirects: "follow" } },
+		options: { redirects: "same-origin" }, url: "https://a.example/start",
+		routes: { "https://a.example/start": [302, "https://b.example/final"] },
+	});
+	assert.match(result.error, /Refused cross-origin redirect/);
+	assert.deepEqual(fetched, ["https://a.example/start"]);
+});
+
+test("follow mode still refuses redirects to private targets", async () => {
+	const { fetched, result } = await run({
+		options: { redirects: "follow" }, url: "https://a.example/start",
+		routes: { "https://a.example/start": [302, "http://127.0.0.1/internal"] },
+	});
+	assert.ok(result.error);
+	assert.deepEqual(fetched, ["https://a.example/start"]);
+});
+
 test("without the policy a cross-origin redirect is still followed", async () => {
 	const { fetched, result } = await run({
 		url: "https://a.example/start",

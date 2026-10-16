@@ -30,6 +30,30 @@ test("extractPDFToMarkdown works on Node 22 without native Promise.try", () => {
 	assert.match(child.stdout, /Second \(line\)/);
 });
 
+test("PDF extraction works when the runtime cannot resolve unpdf's lazy PDF.js self-import", () => {
+	const loaderDir = mkdtempSync(join(tmpdir(), "pi-pdf-self-import-"));
+	const loaderPath = join(loaderDir, "block-self-import.mjs");
+	writeFileSync(loaderPath, `
+		export function resolve(specifier, context, nextResolve) {
+			if (specifier === "unpdf/pdfjs" && context.parentURL?.includes("/unpdf/dist/")) {
+				throw new Error("Runtime cannot resolve the dependency's import-only self-reference");
+			}
+			return nextResolve(specifier, context);
+		}
+	`);
+	try {
+		const child = spawnSync(process.execPath, ["--experimental-loader", loaderPath, "--input-type=module"], {
+			input: buildChildScript(extractorUrl, false, "none", "none", "unpdf"),
+			encoding: "utf8",
+			maxBuffer: 2 * 1024 * 1024,
+		});
+		assert.equal(child.status, 0, errorSummary(child.stderr));
+		assert.match(child.stdout, /Hello PDF/);
+	} finally {
+		rmSync(loaderDir, { recursive: true, force: true });
+	}
+});
+
 test("extractPDFToMarkdown uses Gemini before loading unpdf", () => {
 	const loaderDir = mkdtempSync(
 		join(tmpdir(), "pi-web-access-pdf-gemini-first-"),
@@ -153,6 +177,7 @@ function buildUnpdfLoader() {
           shortCircuit: true,
           source:
             "import * as unpdf from " + JSON.stringify(unpdfUrl) + ";" +
+            "export const definePDFJSModule = unpdf.definePDFJSModule;" +
             "export const getDocumentProxy = (...args) => {" +
             "  globalThis.__piWebAccessUnpdfOptions = args[1];" +
             "  return unpdf.getDocumentProxy(...args);" +

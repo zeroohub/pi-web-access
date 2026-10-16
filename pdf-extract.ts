@@ -1,10 +1,9 @@
 /**
  * PDF Content Extractor
  *
- * Converts PDFs to Markdown. The `auto` provider chain runs Datalab
- * (deterministic, layout-aware) first, then Gemini API, with unpdf as the
- * deterministic local fallback; the chain can also be pinned with
- * `pdf.provider`.
+ * Converts PDFs to Markdown. The `auto` chain tries a configured endpoint,
+ * PaddleOCR, Datalab, Gemini, then local unpdf. Explicit PaddleOCR selection
+ * is strict; the other remote selections retain their local fallback.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -27,6 +26,8 @@ import {
 } from "./endpoint-pdf-extract.ts";
 import { extractPDFViaGemini } from "./gemini-pdf-extract.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
+import { extractPDFViaPaddleOCR, isPaddleOCRAvailable } from "./paddleocr-pdf-extract.ts";
+import type { Lookup } from "./ssrf-protection.ts";
 
 export interface PDFExtractResult {
 	title: string;
@@ -43,13 +44,15 @@ export interface PDFExtractOptions {
 	filename?: string;
 	signal?: AbortSignal;
 	geminiTimeoutMs?: number;
+	lookup?: Lookup;
 }
 
-export type PDFProvider = "auto" | "endpoint" | "gemini" | "datalab" | "unpdf";
+export type PDFProvider = "auto" | "endpoint" | "paddleocr" | "gemini" | "datalab" | "unpdf";
 
 export const PDF_PROVIDER_VALUES = new Set<PDFProvider>([
 	"auto",
 	"endpoint",
+	"paddleocr",
 	"gemini",
 	"datalab",
 	"unpdf",
@@ -156,6 +159,8 @@ async function getUnpdf() {
 		import("unpdf"),
 		import("unpdf/pdfjs"),
 	]);
+	// Pi's loader can import this subpath directly but fail unpdf's lazy self-import.
+	await unpdf.definePDFJSModule(async () => pdfjs);
 	const { VerbosityLevel } = pdfjs as typeof pdfjs & {
 		VerbosityLevel: { ERRORS: number };
 	};
@@ -212,6 +217,40 @@ export async function extractPDFToMarkdown(
 			}
 		} catch (err) {
 			if (shouldRethrowExtractionError(err, signal)) throw err;
+		}
+	}
+
+	if (provider === "auto" || provider === "paddleocr") {
+		try {
+			if (provider === "paddleocr" || isPaddleOCRAvailable()) {
+				signal?.throwIfAborted();
+				if (!isPaddleOCRAvailable()) throw new Error("PDF provider paddleocr requires paddleocrApiKey or PADDLEOCR_API_KEY");
+				const { getDocumentProxy, VerbosityLevel } = await getUnpdf();
+				// Count locally so processing limits and truncation do not depend on remote reporting.
+				// Copy the bytes: PDF.js may transfer its input buffer to a worker.
+				const document = await getDocumentProxy(new Uint8Array(buffer.slice(0)), { verbosity: VerbosityLevel.ERRORS });
+				const totalPages = document.numPages;
+				await document.loadingTask.destroy();
+				const result = await extractPDFViaPaddleOCR(buffer, {
+					maxPages: safeMaxPages,
+					totalPages,
+					signal,
+					lookup: options.lookup,
+				});
+				return writeMarkdownResult({
+					markdownBody: result.markdown,
+					title: urlTitle,
+					pages: totalPages,
+					outputDir,
+					filename,
+					url,
+					truncated: totalPages > safeMaxPages,
+					pagesToExtract: Math.min(totalPages, safeMaxPages),
+				});
+			}
+		} catch (err) {
+			if (signal?.aborted) throw signal.reason;
+			if (provider === "paddleocr" || shouldRethrowExtractionError(err, signal)) throw err;
 		}
 	}
 

@@ -2011,8 +2011,8 @@ export default function (pi: ExtensionAPI) {
 			proxy: Type.Optional(Type.String({
 				description: "http(s) or socks proxy URL (e.g. http://host:port or socks5h://host:port) used for this fetch. Needed when the target is unreachable directly; localhost and NO_PROXY hosts always bypass the proxy. Empty string forces direct access.",
 			})),
-			redirects: Type.Optional(StringEnum(["same-origin"], {
-				description: "Refuse cross-origin redirects: every redirect target must match the requested URL's scheme, hostname and effective port, and extraction paths whose redirect chain cannot be observed are refused instead of used.",
+			redirects: Type.Optional(StringEnum(["follow", "same-origin"], {
+				description: "Use follow for normal redirects and configured hosted extraction (Tavily/Firecrawl). Use same-origin to refuse cross-origin redirects and extraction paths whose redirect chain cannot be observed. Omit to use configuration/defaults. A configured same-origin policy cannot be weakened per call.",
 			})),
 		}),
 		outputSchema: fetchContentOutputSchema,

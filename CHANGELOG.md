@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Add Baidu hosted PaddleOCR PDF extraction, defaulting to `PaddleOCR-VL-1.6`, with async multipart jobs, processing-page limits, structured Markdown, safe result downloads, and a shared 300-second deadline. Configured credentials enable the tier after the self-hosted endpoint in `pdf.provider: "auto"`; explicit `"paddleocr"` selection fails visibly instead of falling back. Configure `paddleocrApiKey`, optional `paddleocrBaseUrl`, `pdf.paddleocrModel`, and `pdf.paddleocrTimeoutMs`; the tool schema is unchanged.
+- Explicitly permit normal redirects and configured hosted extraction with `fetchContent.redirects: "follow"` or the `fetch_content` argument `redirects: "follow"`. Configured same-origin restrictions remain enforced.
+- Opt into basic Tavily markdown extraction by adding `tavily` to `fetchRouting.providers` and enabling `fetchRouting.allowRemoteHostedProviders`. Extraction reuses Tavily gateway configuration, credentials, and key rotation; the default fetch route is unchanged.
+- Set `openaiSearchThinkingLevel` to control reasoning for OpenAI Responses search. Pi model thinking-level mappings are honored, including pinned and current-model searches; unset configuration and optional alpha search remain unchanged.
+
 ## [0.41.0] - 2026-10-14
 
 ### Highlights
