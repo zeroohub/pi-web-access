@@ -1215,7 +1215,7 @@ async function extractViaHttp(
 	const result = await extractHttpResource(url, timeoutMs, state, signal, options, preferMarkdown);
 	return {
 		...result,
-		provider: result.provider ?? (!result.error && state.invoked ? "http" : null),
+		provider: result.provider === undefined ? (!result.error && state.invoked ? "http" : null) : result.provider,
 		attempts: state.attempts ?? result.attempts ?? (state.invoked ? [
 			result.error ? { provider: "http", outcome: "failed", error: "HTTP extraction failed" } : { provider: "http", outcome: "succeeded" },
 		] : []),
@@ -1231,6 +1231,7 @@ async function extractHttpResource(
 	preferMarkdown: boolean,
 ): Promise<HttpExtractedContent> {
 	const activityId = activityMonitor.logStart({ type: "fetch", url });
+	let terminal = options?.mode !== "raw" && isPDF(url);
 
 	const controller = new AbortController();
 	const startedAt = Date.now();
@@ -1277,6 +1278,7 @@ async function extractHttpResource(
 		const discoveryOnly = options?.provider && options.provider !== "auto" && options.provider !== "http";
 		if (!response.ok && options?.mode !== "raw") {
 			const knownPDF = isPDF(url, response.headers.get("content-type") ?? "");
+			terminal ||= knownPDF;
 			state.invoked = !discoveryOnly && !knownPDF;
 			await response.body?.cancel();
 			activityMonitor.logComplete(activityId, response.status);
@@ -1294,6 +1296,7 @@ async function extractHttpResource(
 		const contentType = response.headers.get("content-type") || "";
 		const mimeType = contentType.split(";", 1)[0]?.trim().toLowerCase() ?? "";
 		const isPDFContent = isPDF(url, contentType);
+		terminal ||= isPDFContent && options?.mode !== "raw";
 		const pdfConfig = isPDFContent ? loadPDFConfig() : null;
 		if (isPDFContent && pdfConfig && !pdfConfig.enabled) {
 			activityMonitor.logComplete(activityId, response.status);
@@ -1446,6 +1449,8 @@ async function extractHttpResource(
 			// status, cancellation, and any content it has. This markdown only fills a
 			// recoverable empty response, marked incomplete with its status and error.
 			const normal = await extractViaHttp(url, Math.max(1, timeoutMs - (Date.now() - startedAt)), signal, options, false);
+			terminal ||= normal.terminal === true;
+			state.attempts = normal.attempts;
 			if (signal?.aborted || isNonRecoverableHttpError(normal.error) ||
 				normal.status === 404 || normal.status === 410 || isAbortError(normal.error)) return normal;
 			const normalHasBody = normal.content.trim() !== appendDeclaredWebLinks("", normal.declaredLinks ?? []).trim();
@@ -1578,7 +1583,8 @@ async function extractHttpResource(
 		// caller cancellation taking precedence over the internal deadline.
 		if (signal?.aborted) return abortedResult(url);
 		if (controller.signal.aborted || Date.now() - startedAt >= timeoutMs) {
-			return { url, title: "", content: "", error: "The operation was aborted." };
+			// A PDF deadline cannot make URL-only web-provider fallback safe.
+			return { url, title: "", content: "", error: "The operation was aborted.", ...(terminal ? { terminal: true } : {}) };
 		}
 	}
 }

@@ -18,6 +18,7 @@ function run(scenario = {}) {
 			import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 			import { tmpdir } from 'node:os';
 			import { join } from 'node:path';
+			import { mock } from 'node:test';
 			import { makePdf } from ${JSON.stringify(fixtureUrl)};
 			const s = ${JSON.stringify(scenario)};
 			const root = await mkdtemp(join(tmpdir(), 'pi-extract-selection-'));
@@ -62,6 +63,7 @@ function run(scenario = {}) {
 					if (s.redirect) return new Response(null, {status: 302, headers: {location: s.redirect}});
 					if (s.pdfHttpError) return new Response('unavailable', {status: 503, headers: {'content-type': 'application/pdf'}});
 					if (s.image) return new Response('synthetic image bytes', {headers: {'content-type': 'image/png'}});
+					if (s.shortMarkdown && calls.filter(call => call.url === url).length === 1) return new Response('# Short negotiated Markdown', {headers: {'content-type': 'text/markdown'}});
 					if (s.pdf) return new Response(s.invalidPdf ? 'bad PDF' : makePdf('Actual PDF body', s.pages ?? 1), {headers: {'content-type': 'application/pdf', ...(s.length ? {'content-length': String(s.length)} : {})}});
 					if (s.blocked) return new Response('blocked', {status: 403});
 					if (s.unusedBody) return new Response(new ReadableStream({cancel() {cancelledBody = true;}}), {headers: {'content-type': 'text/html', ...(s.declared ? {link: '</docs>; rel=service-doc'} : {})}});
@@ -76,7 +78,15 @@ function run(scenario = {}) {
 				if (address === 'https://api.parallel.ai/v1/extract') return Response.json({results: [{url, title: 'Parallel page', excerpts: ['# Parallel page ' + 'Substantial content. '.repeat(40)], full_content: '# Parallel full content ' + 'Substantial content. '.repeat(40)}]});
 				if (address === 'https://search.parallel.ai/mcp') return Response.json({jsonrpc: '2.0', id: 1, result: {content: [{type: 'text', text: JSON.stringify({results: [{url, title: 'Parallel MCP page', full_content: '# Parallel MCP page'}]})}]}});
 				if (address === 'https://api.brightdata.com/request') return new Response('# Bright Data page');
-				if (address === 'http://127.0.0.1:9/parse') return Response.json({markdown: 'Endpoint PDF content', pages: 1});
+				if (address === 'http://127.0.0.1:9/parse') {
+					if (s.pdfEndpointDeadline) {
+						if (s.elapsedOnly) mock.timers.setTime(101);
+						else mock.timers.tick(101);
+						if (s.cancelAtPdfEndpoint) controller.abort();
+						if (s.pdfEndpointDeadline === 'failure') return new Response('unavailable', {status: 503});
+					}
+					return Response.json({markdown: 'Endpoint PDF content', pages: 1});
+				}
 				if (address.includes('paddleocr.aistudio-app.com')) return new Response('unavailable', {status: 503});
 				if (address.includes('generativelanguage.googleapis.com') && s.localVideo) {
 					if (address.includes('/upload/')) return new Response(null, {headers: {'x-goog-upload-url': 'https://generativelanguage.googleapis.com/synthetic-upload'}});
@@ -99,9 +109,10 @@ function run(scenario = {}) {
 			};
 			try {
 				const { extractContent } = await import(${JSON.stringify(extractUrl)});
+				if (s.pdfEndpointDeadline) mock.timers.enable({apis: ['Date', 'setTimeout'], now: 0});
 				const result = await extractContent(url, controller.signal, {lookup: async () => [{address: '93.184.216.34', family: 4}], ...s.options});
 				console.log(JSON.stringify({result, calls, cancelledBody, resizeCalls: globalThis.resizeCalls}));
-			} finally { await rm(root, {recursive: true, force: true}); }
+			} finally { mock.timers.reset(); await rm(root, {recursive: true, force: true}); }
 		`,
 	});
 	assert.equal(child.status, 0, child.stderr || child.error?.message);
@@ -166,6 +177,22 @@ test("extractContent discovers an extensionless PDF once before unused Tavily cr
 	assert.deepEqual(result.attempts, [{provider: null, extractionProvider: "unpdf", outcome: "succeeded"}]);
 	assert.deepEqual(calls.map(call => call.url), ["https://example.com/page"]);
 });
+
+for (const provider of ["auto", "http"]) {
+	test(`extractContent ${provider} preserves null ordinary provenance when short Markdown retries as PDF`, () => {
+		const {result, calls} = run({
+			shortMarkdown: true, pdf: true, options: {provider, mode: "answer"}, config: {pdf: {provider: "unpdf"}},
+		});
+		assert.equal(result.error, null);
+		assert.match(result.content, /Actual PDF body/);
+		assert.equal(result.provider, null);
+		assert.equal(result.extractionProvider, "unpdf");
+		assert.deepEqual(result.attempts, [{provider: null, extractionProvider: "unpdf", outcome: "succeeded"}]);
+		assert.deepEqual(calls.map(call => call.url), ["https://example.com/page", "https://example.com/page"]);
+		assert.match(calls[0].headers.accept, /^text\/markdown/);
+		assert.match(calls[1].headers.accept, /^text\/html/);
+	});
+}
 
 test("extractContent refuses PDF web fallback even when Firecrawl v2 caps pages but cannot bind input size", () => {
 	const {result, calls} = run({
@@ -369,6 +396,61 @@ test("extractContent successful hosted PDF engines retain actual null-route prov
 	assert.equal(result.provider, null);
 	assert.equal(result.extractionProvider, "endpoint");
 	assert.deepEqual(result.attempts, [{provider: null, extractionProvider: "endpoint", outcome: "succeeded"}]);
+	assert.deepEqual(calls.map(call => call.url), ["https://example.com/page", "http://127.0.0.1:9/parse"]);
+});
+
+for (const outcome of ["success", "failure"]) {
+	for (const elapsedOnly of [false, true]) {
+		test(`extractContent PDF ${outcome} after the HTTP deadline remains terminal (${elapsedOnly ? "elapsed" : "timer"})`, () => {
+			const {result, calls} = run({
+				pdf: true, invalidPdf: outcome === "failure", pdfEndpointDeadline: outcome, elapsedOnly,
+				options: {provider: "tavily", timeoutMs: 100},
+				config: {pdf: {provider: "endpoint", endpointUrl: "http://127.0.0.1:9/parse"}, tavilyApiKey: "synthetic-key"},
+			});
+			assert.deepEqual(calls.map(call => call.url), ["https://example.com/page", "http://127.0.0.1:9/parse"]);
+			assert.equal(result.error, "The operation was aborted.");
+			assert.equal(result.content, "");
+			assert.equal(result.provider, null);
+			assert.deepEqual(result.attempts, outcome === "success"
+				? [{provider: null, extractionProvider: "endpoint", outcome: "succeeded"}]
+				: [
+					{provider: null, extractionProvider: "endpoint", outcome: "failed", error: "PDF endpoint extraction failed"},
+					{provider: null, extractionProvider: "unpdf", outcome: "failed", error: "PDF unpdf extraction failed"},
+				]);
+		});
+	}
+}
+
+for (const outcome of ["success", "failure"]) {
+	test(`extractContent negotiated PDF ${outcome} after the retry deadline remains terminal`, () => {
+		const {result, calls} = run({
+			shortMarkdown: true, pdf: true, invalidPdf: outcome === "failure", pdfEndpointDeadline: outcome,
+			options: {provider: "auto", timeoutMs: 100},
+			config: {pdf: {provider: "endpoint", endpointUrl: "http://127.0.0.1:9/parse"}},
+		});
+		assert.deepEqual(calls.map(call => call.url), ["https://example.com/page", "https://example.com/page", "http://127.0.0.1:9/parse"]);
+		assert.equal(result.error, "The operation was aborted.");
+		assert.equal(result.content, "");
+		assert.equal(result.provider, null);
+		assert.deepEqual(result.attempts, outcome === "success"
+			? [{provider: null, extractionProvider: "endpoint", outcome: "succeeded"}]
+			: [
+				{provider: null, extractionProvider: "endpoint", outcome: "failed", error: "PDF endpoint extraction failed"},
+				{provider: null, extractionProvider: "unpdf", outcome: "failed", error: "PDF unpdf extraction failed"},
+			]);
+	});
+}
+
+test("extractContent caller cancellation takes precedence over a PDF deadline without hosted fallback", () => {
+	const {result, calls} = run({
+		pdf: true, pdfEndpointDeadline: "success", cancelAtPdfEndpoint: true,
+		options: {provider: "tavily", timeoutMs: 100},
+		config: {pdf: {provider: "endpoint", endpointUrl: "http://127.0.0.1:9/parse"}, tavilyApiKey: "synthetic-key"},
+	});
+	assert.equal(result.error, "Aborted");
+	assert.equal(result.content, "");
+	assert.equal(result.provider, null);
+	assert.ok(result.attempts.every(attempt => attempt.provider === null && attempt.extractionProvider === "endpoint"));
 	assert.deepEqual(calls.map(call => call.url), ["https://example.com/page", "http://127.0.0.1:9/parse"]);
 });
 
