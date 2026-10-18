@@ -854,25 +854,26 @@ async function dispatchContent(
 	const runSpecialized = async (
 		extractionProvider: string,
 		extract: () => Promise<ExtractedContent | null>,
+		invocation = { invoked: true },
 	): Promise<ExtractedContent | null> => {
 		try {
 			const result = await extract();
 			if (signal?.aborted || result?.error === "Aborted") {
-				attempts.push({ provider: null, extractionProvider, outcome: "failed", error: "Aborted" });
+				if (invocation.invoked) attempts.push({ provider: null, extractionProvider, outcome: "failed", error: "Aborted" });
 				return abortedResult(url);
 			}
 			if (result && !result.error) {
-				attempts.push({ provider: null, extractionProvider, outcome: "succeeded" });
+				if (invocation.invoked) attempts.push({ provider: null, extractionProvider, outcome: "succeeded" });
 				return { ...result, provider: null, extractionProvider };
 			}
 			if (result?.error && isExtractionPreflightError(result.error)) return result;
-			attempts.push({ provider: null, extractionProvider, outcome: "failed", error: `${extractionProvider} extraction failed` });
+			if (invocation.invoked) attempts.push({ provider: null, extractionProvider, outcome: "failed", error: `${extractionProvider} extraction failed` });
 			if (result?.error && isFatalExtractionError(result.error)) return result;
 			specializedError = result?.error ?? `${extractionProvider} extraction failed`;
 			if (result?.error && result.content) specializedFailure = result;
 		} catch (err) {
 			if (isExtractionPreflightError(err)) return { url, title: "", content: "", error: errorMessage(err) };
-			attempts.push({ provider: null, extractionProvider, outcome: "failed", error: `${extractionProvider} extraction failed` });
+			if (invocation.invoked) attempts.push({ provider: null, extractionProvider, outcome: "failed", error: `${extractionProvider} extraction failed` });
 			if (signal?.aborted || isAbortError(err)) return abortedResult(url);
 			if (isFatalExtractionError(err)) return { url, title: "", content: "", error: errorMessage(err) };
 			specializedError = errorMessage(err);
@@ -889,7 +890,10 @@ async function dispatchContent(
 			if (result) return result;
 		}
 		if (isYouTubeURL(url).isYouTube && isYouTubeEnabled()) {
-			const result = await runSpecialized("youtube", () => extractYouTube(url, signal, options?.prompt, options?.model));
+			const invocation = { invoked: false };
+			const result = await runSpecialized("youtube", () => extractYouTube(url, signal, options?.prompt, options?.model, () => {
+				invocation.invoked = true;
+			}), invocation);
 			if (result) return result;
 		}
 	} catch (err) {
@@ -1454,6 +1458,10 @@ async function extractHttpResource(
 			state.attempts = normal.attempts;
 			if (signal?.aborted || isNonRecoverableHttpError(normal.error) ||
 				normal.status === 404 || normal.status === 410 || isAbortError(normal.error)) return normal;
+			// A retry transport failure cannot erase the ordinary extraction already invoked.
+			if (normal.error && !terminal && !normal.attempts?.length && !isExtractionPreflightError(normal.error)) {
+				state.attempts = [{ provider: "http", outcome: "failed", error: "HTTP extraction failed" }];
+			}
 			const normalHasBody = normal.content.trim() !== appendDeclaredWebLinks("", normal.declaredLinks ?? []).trim();
 			if (normalHasBody || !markdown.content.trim()) return normal;
 			return {
