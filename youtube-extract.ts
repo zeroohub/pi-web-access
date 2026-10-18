@@ -99,6 +99,7 @@ export async function extractYouTube(
 	signal?: AbortSignal,
 	prompt?: string,
 	model?: string,
+	onInvocation?: () => void,
 ): Promise<ExtractedContent | null> {
 	const config = loadYouTubeConfig();
 	const { videoId } = isYouTubeURL(url);
@@ -111,9 +112,9 @@ export async function extractYouTube(
 	const activityId = activityMonitor.logStart({ type: "fetch", url: `youtube.com/${videoId ?? "video"}` });
 	const attemptErrors: string[] = [];
 
-	const result = await tryGeminiWeb(canonicalUrl, effectivePrompt, effectiveModel, signal, attemptErrors)
-		?? await tryGeminiApi(canonicalUrl, effectivePrompt, effectiveModel, signal, attemptErrors)
-		?? await tryPerplexity(url, effectivePrompt, signal, attemptErrors);
+	const result = await tryGeminiWeb(canonicalUrl, effectivePrompt, effectiveModel, signal, attemptErrors, onInvocation)
+		?? await tryGeminiApi(canonicalUrl, effectivePrompt, effectiveModel, signal, attemptErrors, onInvocation)
+		?? await tryPerplexity(url, effectivePrompt, signal, attemptErrors, onInvocation);
 
 	if (result) {
 		result.url = url;
@@ -231,6 +232,7 @@ async function tryGeminiWeb(
 	model: string,
 	signal: AbortSignal | undefined,
 	attemptErrors: string[],
+	onInvocation?: () => void,
 ): Promise<ExtractedContent | null> {
 	try {
 		const cookies = await isGeminiWebAvailable();
@@ -238,6 +240,7 @@ async function tryGeminiWeb(
 
 		if (signal?.aborted) return null;
 
+		onInvocation?.();
 		const text = await queryWithCookies(prompt, cookies, {
 			youtubeUrl: url,
 			...(model !== "gemini-3.6-flash" ? { model } : {}),
@@ -264,12 +267,14 @@ async function tryGeminiApi(
 	model: string,
 	signal: AbortSignal | undefined,
 	attemptErrors: string[],
+	onInvocation?: () => void,
 ): Promise<ExtractedContent | null> {
 	try {
 		if (!isGeminiApiAvailableWithVideo()) return null;
 
 		if (signal?.aborted) return null;
 
+		onInvocation?.();
 		const text = await queryGeminiApiWithVideo(prompt, url, {
 			model,
 			signal,
@@ -294,6 +299,7 @@ async function tryPerplexity(
 	prompt: string,
 	signal: AbortSignal | undefined,
 	attemptErrors: string[],
+	onInvocation?: () => void,
 ): Promise<ExtractedContent | null> {
 	try {
 		if (signal?.aborted || !isPerplexityAvailable()) return null;
@@ -302,6 +308,7 @@ async function tryPerplexity(
 			? `Summarize this YouTube video in detail: ${url}`
 			: `${prompt} YouTube video: ${url}`;
 
+		onInvocation?.();
 		const answer = await askPerplexity(perplexityQuery, { signal });
 
 		if (!answer) return null;

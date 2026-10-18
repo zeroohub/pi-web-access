@@ -60,7 +60,9 @@ function run(scenario = {}) {
 				if (address === url) {
 					if (s.cancelDuringDiscovery) controller.abort();
 					if (s.discoveryError) throw new Error('Authorization: Bearer private-transport-secret at /private/config');
+					if (s.retryDiscoveryError && calls.filter(call => call.url === url).length > 1) throw new Error('network failed');
 					if (s.redirect) return new Response(null, {status: 302, headers: {location: s.redirect}});
+					if (s.retryRedirect && calls.filter(call => call.url === url).length > 1) return new Response(null, {status: 302, headers: {location: s.retryRedirect}});
 					if (s.pdfHttpError) return new Response('unavailable', {status: 503, headers: {'content-type': 'application/pdf'}});
 					if (s.image) return new Response('synthetic image bytes', {headers: {'content-type': 'image/png'}});
 					if (s.shortMarkdown && calls.filter(call => call.url === url).length === 1) {
@@ -102,7 +104,9 @@ function run(scenario = {}) {
 					if (address.endsWith('/synthetic-upload')) return Response.json({file: {name: 'files/synthetic-video', uri: 'https://generativelanguage.googleapis.com/files/synthetic-video'}});
 					if (address.endsWith('/files/synthetic-video')) return init.method === 'DELETE' ? new Response(null) : Response.json({state: 'ACTIVE'});
 				}
+				if (address === 'https://api.perplexity.ai/chat/completions') return Response.json({choices: [{message: {content: s.emptyPerplexity ? '' : 'Synthetic video summary'}}]});
 				if (address.includes('generativelanguage.googleapis.com')) {
+					if (s.cancelYoutube) controller.abort();
 					if (s.youtubeFailure) return Response.json({error: {message: 'Synthetic Gemini failure'}}, {status: 503});
 					return Response.json({candidates: [{finishReason: 'STOP', content: {parts: [{text: '# Specialized YouTube video\\n\\nSynthetic transcript.'}]}}]});
 				}
@@ -159,6 +163,48 @@ test("extractContent auto continues insufficient HTTP content once through the c
 		{provider: "jina", outcome: "succeeded"},
 	]);
 	assert.deepEqual(calls.map(call => call.url), ["https://example.com/page", "https://r.jina.ai/https://example.com/page"]);
+});
+
+for (const provider of ["auto", "http"]) {
+	test(`extractContent ${provider} retains one failed HTTP attempt after a negotiation retry transport failure`, () => {
+		const {result, calls} = run({shortMarkdown: true, retryDiscoveryError: true, options: {provider}});
+		assert.deepEqual(result.attempts, [
+			{provider: "http", outcome: "failed", error: "HTTP extraction failed"},
+			...(provider === "auto" ? [{provider: "jina", outcome: "succeeded"}] : []),
+		]);
+		assert.equal(result.provider, provider === "auto" ? "jina" : null);
+		if (provider === "auto") {
+			assert.equal(result.error, null);
+			assert.match(result.content, /^# Jina page/);
+		} else {
+			assert.equal(result.content, "# Short negotiated Markdown");
+			assert.equal(result.error, "Extracted content appears incomplete\nBrowser retry failed: network failed");
+		}
+		assert.deepEqual(calls.map(call => call.url), [
+			"https://example.com/page", "https://example.com/page",
+			...(provider === "auto" ? ["https://r.jina.ai/https://example.com/page"] : []),
+		]);
+		assert.match(calls[0].headers.accept, /^text\/markdown/);
+		assert.match(calls[1].headers.accept, /^text\/html/);
+	});
+}
+
+test("extractContent negotiation retry preflight and PDF failures never invent ordinary HTTP attempts", () => {
+	for (const scenario of [
+		{pdf: true, config: {pdf: {enabled: false}}},
+		{pdf: true, length: 2 * 1024 * 1024, config: {pdf: {maxSizeMB: 1}}},
+		{pdf: true, invalidPdf: true, config: {pdf: {provider: "unpdf"}}},
+		{pdf: true, config: {pdf: {provider: "paddleocr"}, paddleocrApiKey: "$MISSING_UNUSED_PADDLE_KEY"}},
+		{retryRedirect: "http://127.0.0.1/private"},
+	]) {
+		const {result, calls} = run({shortMarkdown: true, options: {provider: "auto"}, ...scenario});
+		assert.ok(result.error);
+		assert.equal(result.provider, null);
+		assert.deepEqual(result.attempts, scenario.invalidPdf
+			? [{provider: null, extractionProvider: "unpdf", outcome: "failed", error: "PDF unpdf extraction failed"}]
+			: []);
+		assert.deepEqual(calls.map(call => call.url), ["https://example.com/page", "https://example.com/page"]);
+	}
 });
 
 test("extractContent rejects invalid selections and raw/auth conflicts before any extraction", () => {
@@ -342,6 +388,20 @@ test("extractContent skips disabled GitHub specialization without inventing atte
 	assert.deepEqual(result.attempts, [{provider: "tavily", outcome: "succeeded"}]);
 });
 
+for (const provider of ["http", "tavily"]) {
+	test(`extractContent skips unavailable YouTube backends before ordinary ${provider} extraction`, () => {
+		const url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+		const {result, calls} = run({
+			url, options: {provider}, config: {allowBrowserCookies: false, image: {enabled: false}, tavilyApiKey: "synthetic-key"},
+		});
+		assert.equal(result.error, null);
+		assert.equal(result.provider, provider);
+		assert.equal(result.extractionProvider, undefined);
+		assert.deepEqual(result.attempts, [{provider, outcome: "succeeded"}]);
+		assert.deepEqual(calls.map(call => call.url), [url, ...(provider === "tavily" ? ["https://api.tavily.com/extract"] : [])]);
+	});
+}
+
 test("extractContent YouTube specialization preserves legitimate model options before unused Tavily", () => {
 	const {result, calls} = run({url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", options: {provider: "tavily", model: "gemini-3-flash", prompt: "Read the video"}, config: {image: {enabled: false}, geminiApiKey: "synthetic-gemini-key", tavilyApiKey: "$MISSING_UNUSED_TAVILY_KEY"}});
 	assert.equal(result.error, null);
@@ -360,6 +420,49 @@ test("extractContent recoverable YouTube failure continues to explicit hosted ex
 		{provider: null, extractionProvider: "youtube", outcome: "failed", error: "youtube extraction failed"},
 		{provider: "tavily", outcome: "succeeded"},
 	]);
+});
+
+for (const geminiFailure of [false, true]) {
+	test(`extractContent counts invoked empty YouTube extraction once${geminiFailure ? " after another backend fails" : ""}`, () => {
+		const url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+		const {result, calls} = run({
+			url, emptyPerplexity: true, youtubeFailure: geminiFailure, options: {provider: "tavily"},
+			config: {allowBrowserCookies: false, image: {enabled: false}, perplexityApiKey: "synthetic-key", tavilyApiKey: "synthetic-key", ...(geminiFailure ? {geminiApiKey: "synthetic-key"} : {})},
+		});
+		assert.equal(result.error, null);
+		assert.equal(result.provider, "tavily");
+		assert.deepEqual(result.attempts, [
+			{provider: null, extractionProvider: "youtube", outcome: "failed", error: "youtube extraction failed"},
+			{provider: "tavily", outcome: "succeeded"},
+		]);
+		assert.deepEqual(calls.slice(geminiFailure ? 1 : 0).map(call => call.url), ["https://api.perplexity.ai/chat/completions", url, "https://api.tavily.com/extract"]);
+		if (geminiFailure) assert.match(calls[0].url, /generativelanguage.googleapis.com/);
+	});
+}
+
+test("extractContent YouTube credential preflight remains terminal without invented attempts", () => {
+	for (const config of [{geminiApiKey: "$MISSING_UNUSED_GEMINI_KEY"}, {perplexityApiKey: "$MISSING_UNUSED_PERPLEXITY_KEY"}]) {
+		const {result, calls} = run({
+			url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", options: {provider: "tavily"},
+			config: {allowBrowserCookies: false, image: {enabled: false}, tavilyApiKey: "synthetic-key", ...config},
+		});
+		assert.match(result.error, /credential resolution failed:/);
+		assert.equal(result.provider, null);
+		assert.deepEqual(result.attempts, []);
+		assert.deepEqual(calls, []);
+	}
+});
+
+test("extractContent cancellation after actual YouTube invocation records one aborted specialized attempt", () => {
+	const {result, calls} = run({
+		url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", cancelYoutube: true, options: {provider: "tavily"},
+		config: {allowBrowserCookies: false, image: {enabled: false}, geminiApiKey: "synthetic-key", tavilyApiKey: "synthetic-key"},
+	});
+	assert.equal(result.error, "Aborted");
+	assert.equal(result.provider, null);
+	assert.deepEqual(result.attempts, [{provider: null, extractionProvider: "youtube", outcome: "failed", error: "Aborted"}]);
+	assert.equal(calls.length, 1);
+	assert.match(calls[0].url, /generativelanguage.googleapis.com/);
 });
 
 test("extractContent permits safely discovered PDF specialization under same-origin and unused hosted opt-out", () => {
