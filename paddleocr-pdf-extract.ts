@@ -3,6 +3,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { CredentialResolutionError, hasCredentialSource, resolveCredential, redactCredential } from "./credential-source.ts";
 import { fetchRemoteUrl, loadSsrfConfig, type Lookup } from "./ssrf-protection.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
+import { PDFProcessingLimitError } from "./pdf-errors.ts";
 
 const DEFAULT_BASE_URL = "https://paddleocr.aistudio-app.com";
 const DEFAULT_MODEL = "PaddleOCR-VL-1.6";
@@ -161,7 +162,7 @@ export async function extractPDFViaPaddleOCR(buffer: ArrayBuffer, options: Paddl
 		};
 		const limit = Math.min(options.maxPages, options.totalPages);
 		if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000 || buffer.byteLength > 50 * 1024 * 1024) {
-			throw new Error("PaddleOCR requires 1-1000 selected pages and a PDF no larger than 50 MB");
+			throw new PDFProcessingLimitError("PaddleOCR requires 1-1000 selected pages and a PDF no larger than 50 MB");
 		}
 		const form = new FormData();
 		form.append("file", new Blob([buffer], { type: "application/pdf" }), "document.pdf");
@@ -188,7 +189,7 @@ export async function extractPDFViaPaddleOCR(buffer: ArrayBuffer, options: Paddl
 		}
 	} catch (err) {
 		if (options.signal?.aborted) throw options.signal.reason;
-		if (err instanceof CredentialResolutionError) throw err;
+		if (err instanceof CredentialResolutionError || err instanceof PDFProcessingLimitError) throw err;
 		// Do not propagate transport error causes or cached stacks containing request credentials.
 		throw new Error(redactCredential(err instanceof Error ? err.message : String(err), key));
 	} finally {
