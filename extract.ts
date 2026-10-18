@@ -1382,6 +1382,7 @@ async function extractHttpResource(
 					title: result.title,
 					provider: null,
 					extractionProvider: result.extractionProvider,
+					terminal: true,
 					attempts: state.attempts,
 					content: options?.mode === "answer"
 						? result.content

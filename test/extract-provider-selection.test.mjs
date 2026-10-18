@@ -63,7 +63,16 @@ function run(scenario = {}) {
 					if (s.redirect) return new Response(null, {status: 302, headers: {location: s.redirect}});
 					if (s.pdfHttpError) return new Response('unavailable', {status: 503, headers: {'content-type': 'application/pdf'}});
 					if (s.image) return new Response('synthetic image bytes', {headers: {'content-type': 'image/png'}});
-					if (s.shortMarkdown && calls.filter(call => call.url === url).length === 1) return new Response('# Short negotiated Markdown', {headers: {'content-type': 'text/markdown'}});
+					if (s.shortMarkdown && calls.filter(call => call.url === url).length === 1) {
+						const body = s.markdownBodyDeadline ? new ReadableStream({
+							pull(controller) {
+								mock.timers.setTime(101);
+								controller.enqueue(new TextEncoder().encode('# Short negotiated Markdown'));
+								controller.close();
+							},
+						}) : '# Short negotiated Markdown';
+						return new Response(body, {headers: {'content-type': 'text/markdown'}});
+					}
 					if (s.pdf) return new Response(s.invalidPdf ? 'bad PDF' : makePdf('Actual PDF body', s.pages ?? 1), {headers: {'content-type': 'application/pdf', ...(s.length ? {'content-length': String(s.length)} : {})}});
 					if (s.blocked) return new Response('blocked', {status: 403});
 					if (s.unusedBody) return new Response(new ReadableStream({cancel() {cancelledBody = true;}}), {headers: {'content-type': 'text/html', ...(s.declared ? {link: '</docs>; rel=service-doc'} : {})}});
@@ -109,7 +118,7 @@ function run(scenario = {}) {
 			};
 			try {
 				const { extractContent } = await import(${JSON.stringify(extractUrl)});
-				if (s.pdfEndpointDeadline) mock.timers.enable({apis: ['Date', 'setTimeout'], now: 0});
+				if (s.pdfEndpointDeadline || s.markdownBodyDeadline) mock.timers.enable({apis: ['Date', 'setTimeout'], now: 0});
 				const result = await extractContent(url, controller.signal, {lookup: async () => [{address: '93.184.216.34', family: 4}], ...s.options});
 				console.log(JSON.stringify({result, calls, cancelledBody, resizeCalls: globalThis.resizeCalls}));
 			} finally { mock.timers.reset(); await rm(root, {recursive: true, force: true}); }
@@ -440,6 +449,19 @@ for (const outcome of ["success", "failure"]) {
 			]);
 	});
 }
+
+test("extractContent outer Markdown deadline blocks web fallback after an on-time PDF retry success", () => {
+	const {result, calls} = run({
+		shortMarkdown: true, markdownBodyDeadline: true, pdf: true,
+		options: {provider: "auto", timeoutMs: 100},
+		config: {pdf: {provider: "endpoint", endpointUrl: "http://127.0.0.1:9/parse"}},
+	});
+	assert.deepEqual(calls.map(call => call.url), ["https://example.com/page", "https://example.com/page", "http://127.0.0.1:9/parse"]);
+	assert.equal(result.error, "The operation was aborted.");
+	assert.equal(result.content, "");
+	assert.equal(result.provider, null);
+	assert.deepEqual(result.attempts, [{provider: null, extractionProvider: "endpoint", outcome: "succeeded"}]);
+});
 
 test("extractContent caller cancellation takes precedence over a PDF deadline without hosted fallback", () => {
 	const {result, calls} = run({
