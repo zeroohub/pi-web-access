@@ -453,6 +453,22 @@ test("extractContent YouTube credential preflight remains terminal without inven
 	}
 });
 
+test("extractContent later YouTube credential preflight preserves an earlier actual invocation", () => {
+	const {result, calls} = run({
+		url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", youtubeFailure: true, options: {provider: "tavily"},
+		config: {allowBrowserCookies: false, image: {enabled: false}, geminiApiKey: "synthetic-gemini-key", perplexityApiKey: "$MISSING_UNUSED_PERPLEXITY_KEY", tavilyApiKey: "$MISSING_UNUSED_TAVILY_KEY"},
+	});
+	assert.match(result.error, /Perplexity credential resolution failed:/);
+	assert.equal(result.provider, null);
+	assert.equal(result.extractionProvider, undefined);
+	assert.deepEqual(result.attempts, [
+		{provider: null, extractionProvider: "youtube", outcome: "failed", error: "youtube extraction failed"},
+	]);
+	assert.equal(calls.length, 1);
+	assert.match(calls[0].url, /generativelanguage.googleapis.com/);
+	assert.doesNotMatch(JSON.stringify(result.attempts), /MISSING_UNUSED|synthetic-gemini-key/);
+});
+
 test("extractContent cancellation after actual YouTube invocation records one aborted specialized attempt", () => {
 	const {result, calls} = run({
 		url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", cancelYoutube: true, options: {provider: "tavily"},
@@ -463,6 +479,55 @@ test("extractContent cancellation after actual YouTube invocation records one ab
 	assert.deepEqual(result.attempts, [{provider: null, extractionProvider: "youtube", outcome: "failed", error: "Aborted"}]);
 	assert.equal(calls.length, 1);
 	assert.match(calls[0].url, /generativelanguage.googleapis.com/);
+});
+
+test("extractContent discovers extensionless PDFs before automatic ordinary-route restrictions", () => {
+	for (const options of [{provider: "auto"}, {}, {provider: "auto", redirects: "same-origin"}, {redirects: "same-origin"}]) {
+		const {result, calls} = run({
+			pdf: true, options,
+			config: {pdf: {provider: "unpdf"}, fetchRouting: {providers: ["jina"], allowRemoteHostedProviders: Boolean(options.redirects)}},
+		});
+		assert.equal(result.error, null);
+		assert.equal(result.provider, null);
+		assert.equal(result.extractionProvider, "unpdf");
+		assert.deepEqual(result.attempts, [{provider: null, extractionProvider: "unpdf", outcome: "succeeded"}]);
+		assert.deepEqual(calls.map(call => call.url), ["https://example.com/page"]);
+	}
+});
+
+test("extractContent automatic restrictions still refuse ordinary pages after discovery without extraction", () => {
+	for (const redirects of [undefined, "same-origin"]) {
+		const {result, calls, cancelledBody} = run({
+			unusedBody: true, options: {provider: "auto", redirects},
+			config: {fetchRouting: {providers: ["jina"], allowRemoteHostedProviders: Boolean(redirects)}},
+		});
+		assert.match(result.error, redirects ? /same-origin redirect policy/ : /Remote hosted fetch providers are disabled/);
+		assert.equal(result.content, "");
+		assert.equal(result.provider, null);
+		assert.deepEqual(result.attempts, []);
+		assert.equal(cancelledBody, true);
+		assert.deepEqual(calls.map(call => call.url), ["https://example.com/page"]);
+	}
+});
+
+test("extractContent automatic discovery restrictions cannot supersede PDF or URL safety controls", () => {
+	for (const [scenario, expected] of [
+		[{config: {pdf: {enabled: false}}}, /PDF extraction is disabled/],
+		[{length: 2 * 1024 * 1024, config: {pdf: {maxSizeMB: 1}}}, /PDF exceeds configured/],
+		[{config: {pdf: {provider: "paddleocr", maxPages: 1001}, paddleocrApiKey: "synthetic-key"}, pages: 1001}, /1-1000 selected pages/],
+		[{redirect: "http://127.0.0.1/private"}, /Blocked internal address|Refused cross-origin redirect/],
+		[{redirect: "https://other.example/page"}, /Refused cross-origin redirect/],
+		[{cancelDuringDiscovery: true}, /Aborted/],
+	]) {
+		const {result, calls} = run({
+			...scenario, pdf: true, options: {provider: "auto", redirects: "same-origin"},
+			config: {...scenario.config, fetchRouting: {providers: ["jina"], allowRemoteHostedProviders: true}},
+		});
+		assert.match(result.error, expected);
+		assert.equal(result.provider, null);
+		assert.deepEqual(result.attempts, []);
+		assert.deepEqual(calls.map(call => call.url), ["https://example.com/page"]);
+	}
 });
 
 test("extractContent permits safely discovered PDF specialization under same-origin and unused hosted opt-out", () => {
@@ -478,6 +543,7 @@ test("extractContent safety, same-origin discovery redirects, and cancellation r
 		{url: "http://127.0.0.1/private"},
 		{redirect: "http://127.0.0.1/private"},
 		{redirect: "https://other.example/page", options: {provider: "tavily", redirects: "same-origin"}},
+		{redirect: "http://["},
 		{aborted: true}, {cancelDuringDiscovery: true},
 	]) {
 		const {result, calls} = run({options: {provider: "tavily"}, config: {tavilyApiKey: "synthetic-key"}, ...scenario});
@@ -495,6 +561,19 @@ test("extractContent PDF preflight processing limits and credentials stop before
 	]) {
 		const {result, calls} = run({pdf: true, pages: 1001, options: {provider: "tavily"}, config: {...config, tavilyApiKey: "synthetic-key"}});
 		assert.match(result.error, /1-1000 selected pages|credential resolution failed/);
+		assert.equal(result.provider, null);
+		assert.deepEqual(result.attempts, []);
+		assert.deepEqual(calls.map(call => call.url), ["https://example.com/page"]);
+	}
+});
+
+test("extractContent PDF endpoint safety refusal is terminal without a false attempt or ordinary fallback", () => {
+	for (const provider of ["auto", "http", "tavily"]) {
+		const {result, calls} = run({
+			pdf: true, options: {provider},
+			config: {pdf: {provider: "auto", endpointUrl: "http://10.0.0.2/parse"}, geminiApiKey: "synthetic-gemini-key", tavilyApiKey: "$MISSING_UNUSED_TAVILY_KEY"},
+		});
+		assert.match(result.error, /Blocked internal address/);
 		assert.equal(result.provider, null);
 		assert.deepEqual(result.attempts, []);
 		assert.deepEqual(calls.map(call => call.url), ["https://example.com/page"]);

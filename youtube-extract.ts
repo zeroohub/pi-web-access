@@ -77,12 +77,8 @@ function loadYouTubeConfig(): YouTubeConfig {
 }
 
 export function isYouTubeURL(url: string): { isYouTube: boolean; videoId: string | null } {
-	try {
-		const parsed = new URL(url);
-		if (parsed.pathname === "/playlist") {
-			return { isYouTube: false, videoId: null };
-		}
-	} catch {
+	if (URL.parse(url)?.pathname === "/playlist") {
+		return { isYouTube: false, videoId: null };
 	}
 
 	const match = url.match(YOUTUBE_REGEX);
@@ -274,12 +270,11 @@ async function tryGeminiApi(
 
 		if (signal?.aborted) return null;
 
-		onInvocation?.();
 		const text = await queryGeminiApiWithVideo(prompt, url, {
 			model,
 			signal,
 			timeoutMs: 120000,
-		});
+		}, onInvocation);
 
 		return {
 			url,
@@ -308,8 +303,7 @@ async function tryPerplexity(
 			? `Summarize this YouTube video in detail: ${url}`
 			: `${prompt} YouTube video: ${url}`;
 
-		onInvocation?.();
-		const answer = await askPerplexity(perplexityQuery, { signal });
+		const answer = await askPerplexity(perplexityQuery, { signal, onInvocation });
 
 		if (!answer) return null;
 

@@ -9,6 +9,14 @@ const LOOPBACK_ALLOW_RANGES = ["127.0.0.0/8", "::1", "::ffff:127.0.0.0/104"];
 // Proxy schemes where the proxy, not curl, resolves the target hostname.
 const REMOTE_DNS_PROXY_PROTOCOLS = new Set(["http:", "https:", "socks4a:", "socks5h:"]);
 
+/** A URL guard refusal must not be bypassed through another extraction engine. */
+export class RemoteUrlPolicyError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "RemoteUrlPolicyError";
+	}
+}
+
 export type LookupAddress = { address: string; family: number };
 export type Lookup = (hostname: string) => Promise<LookupAddress[]>;
 type Fetch = typeof fetch;
@@ -211,6 +219,8 @@ interface FetchRemoteOptions extends ValidationOptions {
 	fetch?: Fetch;
 	maxRedirects?: number;
 	onRedirect?: (args: RedirectRequestInitArgs) => RequestInit;
+	/** Called only after URL validation, immediately before a transport invocation. */
+	onRequest?: () => void;
 	/** "same-origin" refuses any redirect that leaves the original URL's origin. */
 	redirects?: RedirectPolicy;
 }
@@ -220,19 +230,20 @@ async function defaultLookup(hostname: string): Promise<LookupAddress[]> {
 }
 
 export async function validateRemoteUrl(rawUrl: string | URL, options: ValidationOptions = {}): Promise<URL> {
-	const url = rawUrl instanceof URL ? rawUrl : new URL(rawUrl);
+	const url = rawUrl instanceof URL ? rawUrl : URL.parse(rawUrl);
+	if (!url) throw new RemoteUrlPolicyError("Invalid URL");
 	if (url.protocol !== "http:" && url.protocol !== "https:") {
-		throw new Error("Only HTTP and HTTPS URLs can be fetched remotely");
+		throw new RemoteUrlPolicyError("Only HTTP and HTTPS URLs can be fetched remotely");
 	}
 
 	const hostname = normalizeHostname(url.hostname);
-	if (!hostname) throw new Error("URL must include a hostname");
+	if (!hostname) throw new RemoteUrlPolicyError("URL must include a hostname");
 	if (hostname === "localhost") {
 		if (options.allowLoopback === true) return url;
-		throw new Error(`Blocked internal hostname: ${hostname}`);
+		throw new RemoteUrlPolicyError(`Blocked internal hostname: ${hostname}`);
 	}
 	if (hostname.endsWith(".localhost")) {
-		throw new Error(`Blocked internal hostname: ${hostname}`);
+		throw new RemoteUrlPolicyError(`Blocked internal hostname: ${hostname}`);
 	}
 
 	const allowRanges = parseAllowRanges(options.allowRanges);
@@ -260,10 +271,10 @@ export async function validateRemoteUrl(rawUrl: string | URL, options: Validatio
 		const hint = !trustProxy && proxy && isConfiguredRemoteDnsProxy(url, proxy)
 			? ". If your configured proxy resolves hostnames, set ssrf.trustEnvProxy to true in web-search.json."
 			: "";
-		throw new Error(`Failed to resolve ${hostname}: ${message}${hint}`);
+		throw new RemoteUrlPolicyError(`Failed to resolve ${hostname}: ${message}${hint}`);
 	}
 
-	if (addresses.length === 0) throw new Error(`Failed to resolve ${hostname}: no addresses returned`);
+	if (addresses.length === 0) throw new RemoteUrlPolicyError(`Failed to resolve ${hostname}: no addresses returned`);
 	for (const { address } of addresses) {
 		assertPublicAddress(address, hostname, allowRanges);
 	}
@@ -282,17 +293,20 @@ export async function fetchRemoteUrl(
 	let requestInit = init;
 
 	for (let redirects = 0; redirects <= maxRedirects; redirects++) {
+		requestInit.signal?.throwIfAborted();
+		options.onRequest?.();
 		const response = await fetchImpl(current, { ...requestInit, redirect: "manual" });
 		if (!REDIRECT_STATUSES.has(response.status)) return response;
 
 		const location = response.headers.get("location");
 		if (!location) return response;
-		if (redirects === maxRedirects) throw new Error(`Too many redirects fetching ${current.toString()}`);
+		if (redirects === maxRedirects) throw new RemoteUrlPolicyError(`Too many redirects fetching ${current.toString()}`);
 
 		const from = current;
-		const next = new URL(location, current);
+		const next = URL.parse(location, current);
+		if (!next) throw new RemoteUrlPolicyError("Invalid redirect URL");
 		if (options.redirects === "same-origin" && next.origin !== configuredOrigin) {
-			throw new Error(`Refused cross-origin redirect by fetch_content redirect policy: ${configuredOrigin} -> ${next.origin}`);
+			throw new RemoteUrlPolicyError(`Refused cross-origin redirect by fetch_content redirect policy: ${configuredOrigin} -> ${next.origin}`);
 		}
 		// allowLoopback exempts an explicitly configured endpoint, never a redirect target: a loopback
 		// base must not be able to pivot the request onto a different loopback origin.
@@ -304,7 +318,7 @@ export async function fetchRemoteUrl(
 		if (options.onRedirect) requestInit = options.onRedirect({ from, to: current, init: requestInit, response });
 	}
 
-	throw new Error(`Too many redirects fetching ${current.toString()}`);
+	throw new RemoteUrlPolicyError(`Too many redirects fetching ${current.toString()}`);
 }
 
 function normalizeHostname(hostname: string): string {
@@ -314,10 +328,10 @@ function normalizeHostname(hostname: string): string {
 function assertDomainPolicy(hostname: string, policy?: DomainPolicy): void {
 	if (!policy) return;
 	if (policy.deny.some((entry) => domainMatches(hostname, entry))) {
-		throw new Error(`Blocked hostname by fetch_content domain policy: ${hostname}`);
+		throw new RemoteUrlPolicyError(`Blocked hostname by fetch_content domain policy: ${hostname}`);
 	}
 	if (policy.allow.length > 0 && !policy.allow.some((entry) => domainMatches(hostname, entry))) {
-		throw new Error(`Hostname not allowed by fetch_content domain policy: ${hostname}`);
+		throw new RemoteUrlPolicyError(`Hostname not allowed by fetch_content domain policy: ${hostname}`);
 	}
 }
 
@@ -391,7 +405,7 @@ function shouldTrustEnvProxy(url: URL, enabled: boolean): boolean {
 /** Only the operator's configured proxy qualifies: a model-supplied per-call proxy must not skip DNS validation. */
 function isConfiguredRemoteDnsProxy(url: URL, proxy: string | null): boolean {
 	return proxy !== null &&
-		REMOTE_DNS_PROXY_PROTOCOLS.has(new URL(proxy).protocol) &&
+		REMOTE_DNS_PROXY_PROTOCOLS.has(URL.parse(proxy)?.protocol ?? "") &&
 		!isProxyBypassedUrl(url) &&
 		proxy === loadConfiguredProxy();
 }
@@ -399,7 +413,7 @@ function isConfiguredRemoteDnsProxy(url: URL, proxy: string | null): boolean {
 function assertPublicAddress(address: string, hostname: string, allowRanges: ParsedCidr[] = []): void {
 	const normalized = normalizeHostname(address);
 	const ipVersion = net.isIP(normalized);
-	if (ipVersion === 0) throw new Error(`Resolved non-IP address for ${hostname}: ${address}`);
+	if (ipVersion === 0) throw new RemoteUrlPolicyError(`Resolved non-IP address for ${hostname}: ${address}`);
 	// Explicitly-allowed ranges bypass the private/reserved checks below. This lets
 	// users exempt synthetic ranges produced by TUN/fake-IP proxies (e.g. 198.18/15).
 	if (isInAllowedRange(normalized, ipVersion, allowRanges)) return;
@@ -407,10 +421,10 @@ function assertPublicAddress(address: string, hostname: string, allowRanges: Par
 		const hint = isFakeIpProxyAddress(normalized)
 			? '. This address is in 198.18.0.0/15, commonly used by TUN/fake-IP proxies. If that matches your setup, configure ssrf.allowRanges with ["198.18.0.0/15"] in web-search.json.'
 			: "";
-		throw new Error(`Blocked internal address for ${hostname}: ${normalized}${hint}`);
+		throw new RemoteUrlPolicyError(`Blocked internal address for ${hostname}: ${normalized}${hint}`);
 	}
 	if (ipVersion === 6 && isBlockedIPv6(normalized)) {
-		throw new Error(`Blocked internal address for ${hostname}: ${normalized}`);
+		throw new RemoteUrlPolicyError(`Blocked internal address for ${hostname}: ${normalized}`);
 	}
 }
 

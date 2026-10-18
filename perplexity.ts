@@ -111,6 +111,7 @@ export function isPerplexityAvailable(): boolean {
 interface PerplexityRequestOptions {
 	activityQuery: string;
 	signal?: AbortSignal;
+	onInvocation?: () => void;
 }
 
 async function postPerplexity(
@@ -138,6 +139,8 @@ async function postPerplexity(
 
 	let response: Response;
 	try {
+		options.signal?.throwIfAborted();
+		options.onInvocation?.();
 		response = await fetch(url, {
 			method: "POST",
 			headers: {
@@ -227,13 +230,13 @@ export async function searchWithPerplexity(query: string, options: SearchOptions
 }
 
 /** Asks Sonar for a prose answer. The Search API returns only ranked pages, so prompts that need prose use this. */
-export async function askPerplexity(prompt: string, options: { signal?: AbortSignal } = {}): Promise<string> {
+export async function askPerplexity(prompt: string, options: { signal?: AbortSignal; onInvocation?: () => void } = {}): Promise<string> {
 	const data = await postPerplexity(PERPLEXITY_CHAT_URL, {
 		model: "sonar",
 		messages: [{ role: "user", content: prompt }],
 		max_tokens: 1024,
 		return_related_questions: false,
-	}, { activityQuery: prompt, signal: options.signal });
+	}, { activityQuery: prompt, signal: options.signal, onInvocation: options.onInvocation });
 
 	const content = (data.choices as Array<{ message?: { content?: unknown } }> | undefined)?.[0]?.message?.content;
 	return typeof content === "string" ? content : "";

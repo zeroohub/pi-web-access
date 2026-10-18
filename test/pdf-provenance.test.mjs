@@ -105,6 +105,115 @@ test("public PDF fallback reports only invoked engines in order with safe failur
 	assert.deepEqual(skipped.attempts, [{ extractionProvider: "unpdf", outcome: "succeeded" }]);
 });
 
+test("PDF endpoint safety preflight is terminal without an attempt or a later upload", () => {
+	for (const provider of ["auto", "endpoint"]) {
+		runExtraction({
+			config: { geminiApiKey: "synthetic-gemini-key", pdf: { provider, endpointUrl: "http://10.0.0.2/parse" } },
+			setup: hostedSetup + `
+				const hosted = globalThis.fetch;
+				const calls = [];
+				globalThis.fetch = async (...args) => { calls.push(String(args[0])); return hosted(...args); };
+			`,
+			body: `
+				await assert.rejects(api.extractPDFToMarkdown(pdf, "https://example.com/report.pdf", options), error => {
+					assert.match(error.message, /Blocked internal address/);
+					assert.deepEqual(api.getPDFExtractionAttempts(error), []);
+					return true;
+				});
+				assert.deepEqual(calls, []);
+			`,
+		});
+	}
+});
+
+test("PDF guard rejection after endpoint submission preserves the actual attempt and prevents fallback", () => {
+	runExtraction({
+		config: { ...allHostedConfig, pdf: { endpointUrl: "http://93.184.216.34/parse" } },
+		setup: `
+			const calls = [];
+			globalThis.fetch = async (url) => {
+				calls.push(String(url));
+				return new Response(null, { status: 302, headers: { location: "http://10.0.0.2/private" } });
+			};
+		`,
+		body: `
+			await assert.rejects(api.extractPDFToMarkdown(pdf, "https://example.com/report.pdf", options), error => {
+				assert.match(error.message, /Blocked internal address/);
+				assert.deepEqual(api.getPDFExtractionAttempts(error), [
+					{ extractionProvider: "endpoint", outcome: "failed", error: "PDF endpoint extraction failed" },
+				]);
+				return true;
+			});
+			assert.deepEqual(calls, ["http://93.184.216.34/parse"]);
+		`,
+	});
+});
+
+test("PaddleOCR safety preflight is terminal and preserves earlier actual PDF attempts only", () => {
+	for (const endpoint of [false, true]) {
+		runExtraction({
+			config: { ...allHostedConfig, paddleocrBaseUrl: "http://10.0.0.2", pdf: endpoint ? { endpointUrl: "http://127.0.0.1:9/parse" } : {} },
+			setup: `const calls = []; globalThis.fetch = async (url) => { calls.push(String(url)); throw new Error("private endpoint failure"); };`,
+			body: `
+				await assert.rejects(api.extractPDFToMarkdown(pdf, "https://example.com/report.pdf", options), error => {
+					assert.match(error.message, /Blocked internal address/);
+					assert.deepEqual(api.getPDFExtractionAttempts(error), ${endpoint
+						? '[{ extractionProvider: "endpoint", outcome: "failed", error: "PDF endpoint extraction failed" }]'
+						: '[]'});
+					return true;
+				});
+				assert.deepEqual(calls, ${endpoint ? '["http://127.0.0.1:9/parse"]' : '[]'});
+			`,
+		});
+	}
+});
+
+for (const stage of ["redirect", "result"]) {
+	test(`PaddleOCR ${stage} safety refusal stays terminal after actual submission`, () => {
+		runExtraction({
+			config: allHostedConfig,
+			setup: `
+				const calls = [];
+				globalThis.fetch = async (url) => {
+					const target = String(url);
+					calls.push(target);
+					if (${JSON.stringify(stage)} === "redirect") return new Response(null, { status: 302, headers: { location: "https://other.example/job" } });
+					if (target.endsWith("/api/v2/ocr/jobs")) return Response.json({ data: { jobId: "ocr-1" } });
+					return Response.json({ data: { state: "done", resultUrl: { jsonUrl: "http://10.0.0.2/private.jsonl" } } });
+				};
+			`,
+			body: `
+				await assert.rejects(api.extractPDFToMarkdown(pdf, "https://example.com/report.pdf", options), error => {
+					assert.match(error.message, /Blocked internal address|Refused cross-origin redirect/);
+					assert.deepEqual(api.getPDFExtractionAttempts(error), [
+						{ extractionProvider: "paddleocr", outcome: "failed", error: "PDF paddleocr extraction failed" },
+					]);
+					assert.doesNotMatch(error.message, /synthetic-paddle-key/);
+					return true;
+				});
+				assert.deepEqual(calls, ${stage === "redirect"
+					? '["https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"]'
+					: '["https://paddleocr.aistudio-app.com/api/v2/ocr/jobs", "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs/ocr-1"]'});
+			`,
+		});
+	});
+}
+
+test("PDF guard configuration rejection is terminal before any extraction request", () => {
+	for (const ssrf of [{ allowRanges: ["invalid-cidr"] }, { trustEnvProxy: "invalid" }, []]) {
+		runExtraction({
+			config: { ...allHostedConfig, ssrf, pdf: { endpointUrl: "http://127.0.0.1:9/parse" } },
+			body: `
+				await assert.rejects(api.extractPDFToMarkdown(pdf, "https://example.com/report.pdf", options), error => {
+					assert.match(error.message, /ssrf/);
+					assert.deepEqual(api.getPDFExtractionAttempts(error), []);
+					return true;
+				});
+			`,
+		});
+	}
+});
+
 test("terminal PDF errors retain their class and expose safe prior attempts as independent snapshots", () => {
 	runExtraction({
 		config: { pdf: { endpointUrl: "http://127.0.0.1:9/parse" } },

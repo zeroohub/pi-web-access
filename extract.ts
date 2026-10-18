@@ -25,7 +25,7 @@ import { extractWithCrawl4ai, isCrawl4aiAvailable } from "./crawl4ai.ts";
 import { extractWithBrightDataUnlocker, isBrightDataUnlockerAvailable } from "./brightdata-unlocker.ts";
 import { isVideoFile, extractVideo, extractVideoFrame, getLocalVideoDuration } from "./video-extract.ts";
 import { appendDeclaredWebLinks, discoverDeclaredWebLinks, type DeclaredWebLink } from "./declared-web-links.ts";
-import { fetchRemoteUrl, loadFetchContentDomainPolicy, resolveFetchContentRedirectPolicy, loadFetchContentUserAgent, loadSsrfConfig, validateRemoteUrl, type DomainPolicy, type Lookup, type RedirectPolicy, type SsrfConfig } from "./ssrf-protection.ts";
+import { fetchRemoteUrl, loadFetchContentDomainPolicy, resolveFetchContentRedirectPolicy, loadFetchContentUserAgent, loadSsrfConfig, validateRemoteUrl, RemoteUrlPolicyError, type DomainPolicy, type Lookup, type RedirectPolicy, type SsrfConfig } from "./ssrf-protection.ts";
 import { formatSeconds, getWebSearchConfigPath, type ProxiedRequestInit } from "./utils.ts";
 import { isImageEnabled } from "./feature-config.ts";
 import { assertAuthFetchUrl, authFetchRedirectGuard, type AuthFetchProfile } from "./auth-fetch.ts";
@@ -167,13 +167,17 @@ function isExtractionPreflightError(err: unknown): boolean {
 
 function isFatalExtractionError(err: unknown): boolean {
 	const message = errorMessage(err).replace(/^GitHub REST fallback failed: /, "");
-	return isExtractionPreflightError(err) || isNonRecoverableHttpError(message);
+	return err instanceof RemoteUrlPolicyError || isExtractionPreflightError(err) || isNonRecoverableHttpError(message);
 }
 
 function isGitHubSpecializationEnabled(section: "githubClone" | "githubPrIssue"): boolean {
 	if (!existsSync(WEB_SEARCH_CONFIG_PATH)) return true;
-	const config = JSON.parse(readFileSync(WEB_SEARCH_CONFIG_PATH, "utf-8"));
-	return config?.[section]?.enabled !== false;
+	try {
+		const config = JSON.parse(readFileSync(WEB_SEARCH_CONFIG_PATH, "utf-8"));
+		return config?.[section]?.enabled !== false;
+	} catch (err) {
+		throw new Error(`Failed to parse ${WEB_SEARCH_CONFIG_PATH}: ${errorMessage(err)}`);
+	}
 }
 
 // Errors that end routing: no other provider may be tried after them.
@@ -854,26 +858,25 @@ async function dispatchContent(
 	const runSpecialized = async (
 		extractionProvider: string,
 		extract: () => Promise<ExtractedContent | null>,
-		invocation = { invoked: true },
+		invocation?: { invoked: boolean },
 	): Promise<ExtractedContent | null> => {
 		try {
 			const result = await extract();
 			if (signal?.aborted || result?.error === "Aborted") {
-				if (invocation.invoked) attempts.push({ provider: null, extractionProvider, outcome: "failed", error: "Aborted" });
+				if (invocation?.invoked ?? true) attempts.push({ provider: null, extractionProvider, outcome: "failed", error: "Aborted" });
 				return abortedResult(url);
 			}
 			if (result && !result.error) {
-				if (invocation.invoked) attempts.push({ provider: null, extractionProvider, outcome: "succeeded" });
+				if (invocation?.invoked ?? true) attempts.push({ provider: null, extractionProvider, outcome: "succeeded" });
 				return { ...result, provider: null, extractionProvider };
 			}
-			if (result?.error && isExtractionPreflightError(result.error)) return result;
-			if (invocation.invoked) attempts.push({ provider: null, extractionProvider, outcome: "failed", error: `${extractionProvider} extraction failed` });
+			const preflight = result?.error && isExtractionPreflightError(result.error);
+			if (invocation?.invoked ?? !preflight) attempts.push({ provider: null, extractionProvider, outcome: "failed", error: `${extractionProvider} extraction failed` });
 			if (result?.error && isFatalExtractionError(result.error)) return result;
 			specializedError = result?.error ?? `${extractionProvider} extraction failed`;
 			if (result?.error && result.content) specializedFailure = result;
 		} catch (err) {
-			if (isExtractionPreflightError(err)) return { url, title: "", content: "", error: errorMessage(err) };
-			if (invocation.invoked) attempts.push({ provider: null, extractionProvider, outcome: "failed", error: `${extractionProvider} extraction failed` });
+			if (invocation?.invoked ?? !isExtractionPreflightError(err)) attempts.push({ provider: null, extractionProvider, outcome: "failed", error: `${extractionProvider} extraction failed` });
 			if (signal?.aborted || isAbortError(err)) return abortedResult(url);
 			if (isFatalExtractionError(err)) return { url, title: "", content: "", error: errorMessage(err) };
 			specializedError = errorMessage(err);
@@ -915,9 +918,9 @@ async function dispatchContent(
 	} catch (err) {
 		return { url, title: "", content: "", error: errorMessage(err) };
 	}
-	if ((!options?.provider || options.provider === "auto") && redirectPolicy === "same-origin" && !fetchRouting.providers.includes("http")) {
-		return redirectPolicyRouteRefusal(url, fetchRouting.providers[0]!);
-	}
+	const automaticPolicyRefusal = (!options?.provider || options.provider === "auto") &&
+		redirectPolicy === "same-origin" && !fetchRouting.providers.includes("http")
+		? redirectPolicyRouteRefusal(url, fetchRouting.providers[0]!) : null;
 	const explicitProvider = options?.provider && options.provider !== "auto" ? options.provider : undefined;
 	const configuredOrder = explicitProvider ? [explicitProvider] : fetchRouting.providers;
 	const providerOrder: FetchProvider[] = explicitProvider ? [explicitProvider] : redirectPolicy === "same-origin"
@@ -925,14 +928,12 @@ async function dispatchContent(
 		: remoteUrl && !fetchRouting.allowRemoteHostedProviders
 			? configuredOrder.filter(provider => !REMOTE_HOSTED_FETCH_PROVIDERS.has(provider))
 			: configuredOrder;
-	if (providerOrder.length === 0) {
-		return {
-			url,
-			title: "",
-			content: "",
-			error: "Remote hosted fetch providers are disabled unless fetchRouting.allowRemoteHostedProviders is true",
-		};
-	}
+	const ordinaryRouteRefusal = automaticPolicyRefusal ?? (providerOrder.length === 0 ? {
+		url,
+		title: "",
+		content: "",
+		error: "Remote hosted fetch providers are disabled unless fetchRouting.allowRemoteHostedProviders is true",
+	} : null);
 
 	let httpResult: ExtractedContent | null = null;
 	let declaredLinks: DeclaredWebLink[] = [];
@@ -946,12 +947,14 @@ async function dispatchContent(
 		? { ...httpResult, error: message }
 		: { url, title: "", content: "", error: message };
 	const runHttpProvider = async (): Promise<ExtractedContent | null> => {
-		const { declaredLinks: discoveredLinks = [], terminal, ...result } = await extractViaHttp(url, fetchTimeoutMs, signal, options);
+		const { declaredLinks: discoveredLinks = [], terminal, ...result } = await extractViaHttp(
+			url, fetchTimeoutMs, signal, options, undefined, ordinaryRouteRefusal ? true : undefined,
+		);
 		httpResult = result;
 		attempts.push(...(httpResult.attempts ?? []));
 		declaredLinks = discoveredLinks;
 		if (signal?.aborted) return abortedResult(url);
-		if (!httpResult.error && (!explicitProvider || explicitProvider === "http" || httpResult.extractionProvider)) return httpResult;
+		if (!httpResult.error && (httpResult.extractionProvider || (!ordinaryRouteRefusal && (!explicitProvider || explicitProvider === "http")))) return httpResult;
 		if (terminal || isNonRecoverableHttpError(httpResult.error) || httpResult.error === options?.rejectDirectImages) {
 			return httpResult;
 		}
@@ -967,6 +970,8 @@ async function dispatchContent(
 		if (explicitProvider === "http") return specializedFailure ?? httpResult!;
 	}
 
+	// Ordinary-route refusals cannot prevent guarded PDF discovery/specialization.
+	if (ordinaryRouteRefusal) return ordinaryRouteRefusal;
 	if (explicitProvider && explicitProvider !== "http") {
 		if (redirectPolicy === "same-origin") return redirectPolicyRouteRefusal(url, explicitProvider);
 		if (remoteUrl && !fetchRouting.allowRemoteHostedProviders && REMOTE_HOSTED_FETCH_PROVIDERS.has(explicitProvider)) {
@@ -1214,9 +1219,10 @@ async function extractViaHttp(
 	signal?: AbortSignal,
 	options?: ExtractOptions,
 	preferMarkdown = options?.mode !== "raw",
+	discoveryOnly = Boolean(options?.provider && options.provider !== "auto" && options.provider !== "http"),
 ): Promise<HttpExtractedContent> {
 	const state: { invoked: boolean; attempts?: ExtractionAttempt[] } = { invoked: false };
-	const result = await extractHttpResource(url, timeoutMs, state, signal, options, preferMarkdown);
+	const result = await extractHttpResource(url, timeoutMs, state, signal, options, preferMarkdown, discoveryOnly);
 	return {
 		...result,
 		provider: result.provider === undefined ? (!result.error && state.invoked ? "http" : null) : result.provider,
@@ -1233,6 +1239,7 @@ async function extractHttpResource(
 	signal: AbortSignal | undefined,
 	options: ExtractOptions | undefined,
 	preferMarkdown: boolean,
+	discoveryOnly: boolean,
 ): Promise<HttpExtractedContent> {
 	const activityId = activityMonitor.logStart({ type: "fetch", url });
 	let terminal = options?.mode !== "raw" && isPDF(url);
@@ -1279,7 +1286,6 @@ async function extractHttpResource(
 				},
 			);
 
-		const discoveryOnly = options?.provider && options.provider !== "auto" && options.provider !== "http";
 		if (!response.ok && options?.mode !== "raw") {
 			const knownPDF = isPDF(url, response.headers.get("content-type") ?? "");
 			terminal ||= knownPDF;
@@ -1583,7 +1589,7 @@ async function extractHttpResource(
 		if (isPDF(url) && options?.mode !== "raw" && !isFatalExtractionError(err)) {
 			return { url, title: "", content: "", error: "PDF download failed. Web-provider fallback cannot preserve the validated PDF bytes and size limit", terminal: true, attempts: [] };
 		}
-		return { url, title: "", content: "", error: message };
+		return { url, title: "", content: "", error: message, ...(err instanceof RemoteUrlPolicyError ? { terminal: true } : {}) };
 	} finally {
 		clearTimeout(timeoutId);
 		signal?.removeEventListener("abort", onAbort);

@@ -27,7 +27,7 @@ import {
 import { extractPDFViaGemini } from "./gemini-pdf-extract.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
 import { extractPDFViaPaddleOCR, isPaddleOCRAvailable } from "./paddleocr-pdf-extract.ts";
-import type { Lookup } from "./ssrf-protection.ts";
+import { RemoteUrlPolicyError, type Lookup } from "./ssrf-protection.ts";
 import { PDFProcessingLimitError } from "./pdf-errors.ts";
 
 export { PDFProcessingLimitError } from "./pdf-errors.ts";
@@ -222,6 +222,7 @@ async function extractPDFWithAttempts(
 	async function attempt<T>(
 		extractionProvider: Exclude<PDFProvider, "auto">,
 		extract: () => Promise<T>,
+		invocation?: { invoked: boolean },
 	): Promise<T> {
 		signal?.throwIfAborted();
 		try {
@@ -229,7 +230,8 @@ async function extractPDFWithAttempts(
 			attempts.push({ extractionProvider, outcome: "succeeded" });
 			return result;
 		} catch (err) {
-			if (!(err instanceof CredentialResolutionError) && !(err instanceof PDFProcessingLimitError) && !isConfigurationError(err)) {
+			const preflight = err instanceof CredentialResolutionError || err instanceof PDFProcessingLimitError || isConfigurationError(err);
+			if (invocation?.invoked ?? !preflight) {
 				attempts.push({ extractionProvider, outcome: "failed", error: `PDF ${extractionProvider} extraction failed` });
 			}
 			throw err;
@@ -254,10 +256,13 @@ async function extractPDFWithAttempts(
 		}
 		try {
 			if (isEndpointApiAvailable()) {
+				const invocation = { invoked: false };
 				const result = await attempt("endpoint", () => extractPDFViaEndpoint(buffer, {
 					maxPages: safeMaxPages,
+					lookup: options.lookup,
+					onInvocation: () => { invocation.invoked = true; },
 					...(signal ? { signal } : {}),
-				}));
+				}), invocation);
 				return writeMarkdownResult({
 					extractionProvider: "endpoint",
 					attempts,
@@ -285,12 +290,14 @@ async function extractPDFWithAttempts(
 				const document = await getDocumentProxy(new Uint8Array(buffer.slice(0)), { verbosity: VerbosityLevel.ERRORS });
 				const totalPages = document.numPages;
 				await document.loadingTask.destroy();
+				const invocation = { invoked: false };
 				const result = await attempt("paddleocr", () => extractPDFViaPaddleOCR(buffer, {
 					maxPages: safeMaxPages,
+					onInvocation: () => { invocation.invoked = true; },
 					totalPages,
 					signal,
 					lookup: options.lookup,
-				}));
+				}), invocation);
 				return writeMarkdownResult({
 					extractionProvider: "paddleocr",
 					attempts,
@@ -489,7 +496,9 @@ function countPageMarkers(markdown: string): number {
 
 function isConfigurationError(err: unknown): boolean {
 	const message = err instanceof Error ? err.message : String(err);
-	return message.startsWith("Failed to parse ");
+	return message.startsWith("Failed to parse ") ||
+		message.startsWith("ssrf.") || message.startsWith("ssrf in ") ||
+		message.startsWith("Invalid CIDR notation in ssrf.");
 }
 
 function shouldRethrowExtractionError(
@@ -497,7 +506,7 @@ function shouldRethrowExtractionError(
 	signal?: AbortSignal,
 ): boolean {
 	if (signal?.aborted) return true;
-	if (err instanceof CredentialResolutionError || err instanceof PDFProcessingLimitError) return true;
+	if (err instanceof CredentialResolutionError || err instanceof PDFProcessingLimitError || err instanceof RemoteUrlPolicyError) return true;
 	return isConfigurationError(err);
 }
 

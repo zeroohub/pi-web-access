@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 import { CredentialResolutionError, hasCredentialSource, resolveCredential, redactCredential } from "./credential-source.ts";
-import { fetchRemoteUrl, loadSsrfConfig, type Lookup } from "./ssrf-protection.ts";
+import { fetchRemoteUrl, loadSsrfConfig, RemoteUrlPolicyError, type Lookup } from "./ssrf-protection.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
 import { PDFProcessingLimitError } from "./pdf-errors.ts";
 
@@ -15,6 +15,7 @@ interface PaddleOCROptions {
 	totalPages: number;
 	signal?: AbortSignal;
 	lookup?: Lookup;
+	onInvocation?: () => void;
 }
 
 function config(): Record<string, unknown> {
@@ -146,7 +147,7 @@ export async function extractPDFViaPaddleOCR(buffer: ArrayBuffer, options: Paddl
 			const response = await abortable(fetchRemoteUrl(url, { ...init, signal }, {
 				...guard,
 				...(api ? { redirects: "same-origin" as const } : {}),
-				fetch: (target, requestInit) => { checkDeadline(); return fetch(target, requestInit); },
+				onRequest: () => { checkDeadline(); options.onInvocation?.(); },
 			}), signal);
 			if (!response.ok) {
 				void response.body?.cancel().catch(() => undefined);
@@ -191,7 +192,9 @@ export async function extractPDFViaPaddleOCR(buffer: ArrayBuffer, options: Paddl
 		if (options.signal?.aborted) throw options.signal.reason;
 		if (err instanceof CredentialResolutionError || err instanceof PDFProcessingLimitError) throw err;
 		// Do not propagate transport error causes or cached stacks containing request credentials.
-		throw new Error(redactCredential(err instanceof Error ? err.message : String(err), key));
+		const message = redactCredential(err instanceof Error ? err.message : String(err), key);
+		if (err instanceof RemoteUrlPolicyError) throw new RemoteUrlPolicyError(message);
+		throw new Error(message);
 	} finally {
 		clearTimeout(timer);
 	}
