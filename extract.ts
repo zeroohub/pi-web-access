@@ -1430,6 +1430,7 @@ async function extractHttpResource(
 					title: result.title,
 					provider: null,
 					extractionProvider: result.extractionProvider,
+					terminal: true,
 					attempts: state.attempts,
 					content: options?.mode === "answer" || options?.mode === "extract"
 						? result.content
