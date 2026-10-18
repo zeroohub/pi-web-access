@@ -28,8 +28,18 @@ import { extractPDFViaGemini } from "./gemini-pdf-extract.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
 import { extractPDFViaPaddleOCR, isPaddleOCRAvailable } from "./paddleocr-pdf-extract.ts";
 import type { Lookup } from "./ssrf-protection.ts";
+import { PDFProcessingLimitError } from "./pdf-errors.ts";
+
+export { PDFProcessingLimitError } from "./pdf-errors.ts";
+
+export type PDFExtractionAttempt =
+	| { extractionProvider: Exclude<PDFProvider, "auto">; outcome: "succeeded" }
+	| { extractionProvider: Exclude<PDFProvider, "auto">; outcome: "failed"; error: string };
 
 export interface PDFExtractResult {
+	/** The engine that produced the Markdown, not the configured fallback chain. */
+	extractionProvider: Exclude<PDFProvider, "auto">;
+	attempts: PDFExtractionAttempt[];
 	title: string;
 	/** The same Markdown written to outputPath, retained for page answering. */
 	content: string;
@@ -168,6 +178,14 @@ async function getUnpdf() {
 	return { getDocumentProxy: unpdf.getDocumentProxy, VerbosityLevel };
 }
 
+const extractionAttemptsByError = new WeakMap<object, PDFExtractionAttempt[]>();
+
+/** Safe snapshots only; the original error is neither wrapped nor modified. */
+export function getPDFExtractionAttempts(error: unknown): PDFExtractionAttempt[] {
+	if ((typeof error !== "object" || error === null) && typeof error !== "function") return [];
+	return (extractionAttemptsByError.get(error) ?? []).map(attempt => ({ ...attempt }));
+}
+
 /**
  * Extract text from a PDF buffer and save it to a Markdown file.
  */
@@ -176,6 +194,23 @@ export async function extractPDFToMarkdown(
 	url: string,
 	options: PDFExtractOptions = {},
 ): Promise<PDFExtractResult> {
+	const attempts: PDFExtractionAttempt[] = [];
+	try {
+		return await extractPDFWithAttempts(buffer, url, options, attempts);
+	} catch (error) {
+		if ((typeof error === "object" && error !== null) || typeof error === "function") {
+			extractionAttemptsByError.set(error, attempts.map(attempt => ({ ...attempt })));
+		}
+		throw error;
+	}
+}
+
+async function extractPDFWithAttempts(
+	buffer: ArrayBuffer,
+	url: string,
+	options: PDFExtractOptions,
+	attempts: PDFExtractionAttempt[],
+): Promise<PDFExtractResult> {
 	const {
 		maxPages,
 		outputDir = DEFAULT_OUTPUT_DIR,
@@ -183,6 +218,23 @@ export async function extractPDFToMarkdown(
 		signal,
 		geminiTimeoutMs,
 	} = options;
+
+	async function attempt<T>(
+		extractionProvider: Exclude<PDFProvider, "auto">,
+		extract: () => Promise<T>,
+	): Promise<T> {
+		signal?.throwIfAborted();
+		try {
+			const result = await extract();
+			attempts.push({ extractionProvider, outcome: "succeeded" });
+			return result;
+		} catch (err) {
+			if (!(err instanceof CredentialResolutionError) && !(err instanceof PDFProcessingLimitError) && !isConfigurationError(err)) {
+				attempts.push({ extractionProvider, outcome: "failed", error: `PDF ${extractionProvider} extraction failed` });
+			}
+			throw err;
+		}
+	}
 
 	const pdfConfig = loadPDFConfig();
 	const safeMaxPages =
@@ -202,11 +254,13 @@ export async function extractPDFToMarkdown(
 		}
 		try {
 			if (isEndpointApiAvailable()) {
-				const result = await extractPDFViaEndpoint(buffer, {
+				const result = await attempt("endpoint", () => extractPDFViaEndpoint(buffer, {
 					maxPages: safeMaxPages,
 					...(signal ? { signal } : {}),
-				});
+				}));
 				return writeMarkdownResult({
+					extractionProvider: "endpoint",
+					attempts,
 					markdownBody: result.markdown,
 					title: urlTitle,
 					pages: result.pages ?? countPageMarkers(result.markdown),
@@ -231,13 +285,15 @@ export async function extractPDFToMarkdown(
 				const document = await getDocumentProxy(new Uint8Array(buffer.slice(0)), { verbosity: VerbosityLevel.ERRORS });
 				const totalPages = document.numPages;
 				await document.loadingTask.destroy();
-				const result = await extractPDFViaPaddleOCR(buffer, {
+				const result = await attempt("paddleocr", () => extractPDFViaPaddleOCR(buffer, {
 					maxPages: safeMaxPages,
 					totalPages,
 					signal,
 					lookup: options.lookup,
-				});
+				}));
 				return writeMarkdownResult({
+					extractionProvider: "paddleocr",
+					attempts,
 					markdownBody: result.markdown,
 					title: urlTitle,
 					pages: totalPages,
@@ -257,14 +313,16 @@ export async function extractPDFToMarkdown(
 	if (provider === "auto" || provider === "datalab") {
 		try {
 			if (isDatalabApiAvailable()) {
-				const result = await extractPDFViaDatalab(buffer, {
+				const result = await attempt("datalab", () => extractPDFViaDatalab(buffer, {
 					maxPages: safeMaxPages,
 					title: urlTitle,
 					mode: pdfConfig.datalabMode,
 					timeoutMs: pdfConfig.datalabTimeoutMs,
 					...(signal ? { signal } : {}),
-				});
+				}));
 				return writeMarkdownResult({
+					extractionProvider: "datalab",
+					attempts,
 					markdownBody: result.markdown,
 					title: urlTitle,
 					pages: result.pages,
@@ -281,15 +339,17 @@ export async function extractPDFToMarkdown(
 	if (provider === "auto" || provider === "gemini") {
 		try {
 			if (isGeminiApiAvailable()) {
-				const markdownBody = await extractPDFViaGemini(buffer, {
+				const markdownBody = await attempt("gemini", () => extractPDFViaGemini(buffer, {
 					maxPages: safeMaxPages,
 					title: urlTitle,
 					...(signal ? { signal } : {}),
 					...(geminiTimeoutMs !== undefined
 						? { timeoutMs: geminiTimeoutMs }
 						: {}),
-				});
+				}));
 				return writeMarkdownResult({
+					extractionProvider: "gemini",
+					attempts,
 					markdownBody,
 					title: urlTitle,
 					pages: countPageMarkers(markdownBody),
@@ -303,66 +363,72 @@ export async function extractPDFToMarkdown(
 		}
 	}
 
-	const { getDocumentProxy, VerbosityLevel } = await getUnpdf();
-	const pdf = await getDocumentProxy(new Uint8Array(buffer), {
-		verbosity: VerbosityLevel.ERRORS,
-	});
-	const metadata = await pdf.getMetadata();
-	const metadataInfo =
-		metadata.info && typeof metadata.info === "object"
-			? (metadata.info as Record<string, unknown>)
-			: null;
+	return attempt("unpdf", async () => {
+		const { getDocumentProxy, VerbosityLevel } = await getUnpdf();
+		const pdf = await getDocumentProxy(new Uint8Array(buffer), {
+			verbosity: VerbosityLevel.ERRORS,
+		});
+		const metadata = await pdf.getMetadata();
+		const metadataInfo =
+			metadata.info && typeof metadata.info === "object"
+				? (metadata.info as Record<string, unknown>)
+				: null;
 
-	const metaTitle =
-		typeof metadataInfo?.Title === "string" ? metadataInfo.Title : undefined;
-	const metaAuthor =
-		typeof metadataInfo?.Author === "string" ? metadataInfo.Author : undefined;
-	const title = metaTitle?.trim() || urlTitle;
-	const pagesToExtract = Math.min(pdf.numPages, safeMaxPages);
-	const truncated = pdf.numPages > safeMaxPages;
-	const pages: { pageNum: number; text: string }[] = [];
+		const metaTitle =
+			typeof metadataInfo?.Title === "string" ? metadataInfo.Title : undefined;
+		const metaAuthor =
+			typeof metadataInfo?.Author === "string" ? metadataInfo.Author : undefined;
+		const title = metaTitle?.trim() || urlTitle;
+		const pagesToExtract = Math.min(pdf.numPages, safeMaxPages);
+		const truncated = pdf.numPages > safeMaxPages;
+		const pages: { pageNum: number; text: string }[] = [];
 
-	for (let i = 1; i <= pagesToExtract; i++) {
-		const page = await pdf.getPage(i);
-		const textContent = await page.getTextContent();
-		const pageText = textContent.items
-			.map((item: unknown) => {
-				const textItem = item as { str?: string };
-				return textItem.str || "";
-			})
-			.join(" ")
-			.replace(/\s+/g, " ")
-			.trim();
+		for (let i = 1; i <= pagesToExtract; i++) {
+			const page = await pdf.getPage(i);
+			const textContent = await page.getTextContent();
+			const pageText = textContent.items
+				.map((item: unknown) => {
+					const textItem = item as { str?: string };
+					return textItem.str || "";
+				})
+				.join(" ")
+				.replace(/\s+/g, " ")
+				.trim();
 
-		if (pageText) {
-			pages.push({ pageNum: i, text: pageText });
+			if (pageText) {
+				pages.push({ pageNum: i, text: pageText });
+			}
 		}
-	}
 
-	const bodyLines: string[] = [];
-	for (let i = 0; i < pages.length; i++) {
-		if (i > 0) {
-			bodyLines.push("");
-			bodyLines.push(`<!-- Page ${pages[i].pageNum} -->`);
-			bodyLines.push("");
+		const bodyLines: string[] = [];
+		for (let i = 0; i < pages.length; i++) {
+			if (i > 0) {
+				bodyLines.push("");
+				bodyLines.push(`<!-- Page ${pages[i].pageNum} -->`);
+				bodyLines.push("");
+			}
+			bodyLines.push(pages[i].text);
 		}
-		bodyLines.push(pages[i].text);
-	}
 
-	return writeMarkdownResult({
-		markdownBody: bodyLines.join("\n"),
-		title,
-		pages: pdf.numPages,
-		outputDir,
-		filename,
-		url,
-		metaAuthor,
-		truncated,
-		pagesToExtract,
+		return writeMarkdownResult({
+			extractionProvider: "unpdf",
+			attempts,
+			markdownBody: bodyLines.join("\n"),
+			title,
+			pages: pdf.numPages,
+			outputDir,
+			filename,
+			url,
+			metaAuthor,
+			truncated,
+			pagesToExtract,
+		});
 	});
 }
 
 async function writeMarkdownResult(options: {
+	extractionProvider: Exclude<PDFProvider, "auto">;
+	attempts: PDFExtractionAttempt[];
 	markdownBody: string;
 	title: string;
 	pages: number;
@@ -407,6 +473,8 @@ async function writeMarkdownResult(options: {
 	await writeFile(outputPath, content, "utf-8");
 
 	return {
+		extractionProvider: options.extractionProvider,
+		attempts: options.attempts,
 		title: options.title,
 		content,
 		pages: options.pages,
@@ -419,14 +487,18 @@ function countPageMarkers(markdown: string): number {
 	return [...markdown.matchAll(PAGE_MARKER_PATTERN)].length;
 }
 
+function isConfigurationError(err: unknown): boolean {
+	const message = err instanceof Error ? err.message : String(err);
+	return message.startsWith("Failed to parse ");
+}
+
 function shouldRethrowExtractionError(
 	err: unknown,
 	signal?: AbortSignal,
 ): boolean {
 	if (signal?.aborted) return true;
-	if (err instanceof CredentialResolutionError) return true;
-	const message = err instanceof Error ? err.message : String(err);
-	return message.startsWith("Failed to parse ");
+	if (err instanceof CredentialResolutionError || err instanceof PDFProcessingLimitError) return true;
+	return isConfigurationError(err);
 }
 
 /**
