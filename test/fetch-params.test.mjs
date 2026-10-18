@@ -93,3 +93,20 @@ test("fetch_content params validate auth profile input", () => {
 	assert.throws(() => normalizeFetchContentParams({ auth: " " }), /auth must be/);
 	assert.throws(() => normalizeFetchContentParams({ auth: 1 }), /auth must be/);
 });
+
+test("fetch_content params accept one web-page provider for the entire URL batch", () => {
+	const providers = ["auto", "http", "firecrawl", "crawl4ai", "jina", "tinyfish", "search1api", "querit", "kagi", "ollama", "parallel", "parallel-mcp", "brightdata", "gemini", "tavily"];
+	for (const provider of providers) {
+		assert.deepEqual(normalizeFetchContentParams({ urls: ["https://example.com/a", "https://example.com/b"], provider }), {
+			urlList: ["https://example.com/a", "https://example.com/b"],
+			options: { provider },
+		});
+	}
+	assert.equal("provider" in normalizeFetchContentParams({}).options, false);
+});
+
+test("fetch_content params reject invalid provider spellings and non-scalar selections", () => {
+	for (const provider of ["unknown", "all", "Tavily", " tavily ", "", null, false, 1, {}, [], ["http"], ["http", "tavily"]]) {
+		assert.throws(() => normalizeFetchContentParams({ url: "https://example.com", provider }), /provider must be/, JSON.stringify(provider));
+	}
+});

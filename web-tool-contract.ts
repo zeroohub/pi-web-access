@@ -4,6 +4,7 @@
 
 import type { FindMode } from "./content-find.ts";
 import type { PageExtraction } from "./field-extract.ts";
+import type { ExtractionProvenance, FetchProviderSelection } from "./fetch-provider.ts";
 import type { RecencyFilter } from "./source-check.ts";
 
 export type WebToolContent =
@@ -34,7 +35,7 @@ export type WebSearchStructuredContent = {
 export type FetchContentStructuredContent = {
 	responseId: string | null;
 	/** In extract mode, each fetched URL also has its `extraction`: typed fields per name, or why extraction failed. */
-	urls: Array<{ url: string; title: string; content: string; error: string | null; mimeType?: string; status?: number; duration?: number; extraction?: PageExtraction }>;
+	urls: Array<ExtractionProvenance & { url: string; title: string; content: string; error: string | null; mimeType?: string; status?: number; duration?: number; extraction?: PageExtraction }>;
 };
 
 export interface WebSearchCallParams {
@@ -53,6 +54,7 @@ export interface WebSearchCallParams {
 export interface FetchContentCallParams {
 	url?: string;
 	urls?: string[];
+	provider?: FetchProviderSelection;
 	mode?: string;
 	forceClone?: boolean;
 	proxy?: string;
