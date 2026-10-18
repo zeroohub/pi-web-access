@@ -7,6 +7,7 @@
 import { Type, type TSchema } from "typebox";
 import { Value } from "typebox/value";
 import { RESOLVED_SEARCH_PROVIDERS } from "./gemini-search.ts";
+import { FETCH_PROVIDERS, FETCH_PROVIDER_DESCRIPTION } from "./fetch-provider.ts";
 
 function stringEnum(values: readonly string[], description: string) {
 	return Type.Unsafe<string>({ type: "string", enum: [...values], description });
@@ -58,6 +59,7 @@ export const MCP_TOOL_DEFINITIONS: readonly McpToolDefinition[] = [
 		inputSchema: Type.Object({
 			url: Type.Optional(Type.String({ description: "Single URL to fetch." })),
 			urls: Type.Optional(Type.Array(Type.String(), { description: "Multiple URLs fetched in parallel." })),
+			provider: Type.Optional(stringEnum(["auto", ...FETCH_PROVIDERS], FETCH_PROVIDER_DESCRIPTION)),
 			mode: Type.Optional(stringEnum(["readable", "raw"], "readable = extract readable content as markdown (default); raw = return the exact textual body using direct HTTP only.")),
 			forceClone: Type.Optional(Type.Boolean({ description: "Force cloning GitHub repositories that exceed the size threshold." })),
 			proxy: Type.Optional(proxySchema),

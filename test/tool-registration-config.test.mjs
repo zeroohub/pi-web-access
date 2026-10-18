@@ -27,7 +27,7 @@ function runRegistrationWithConfig(configText) {
 			const commands = [];
 			let active = [];
 			initializeExtension({
-				registerTool(tool) { tools.push({ name: tool.name, description: tool.description, promptSnippet: tool.promptSnippet, parameters: tool.parameters }); active.push(tool.name); },
+				registerTool(tool) { tools.push({ name: tool.name, description: tool.description, promptSnippet: tool.promptSnippet, parameters: tool.parameters, outputSchema: tool.outputSchema }); active.push(tool.name); },
 				registerCommand(name) { commands.push(name); },
 				registerShortcut() {},
 				on() { return () => {}; },
@@ -77,7 +77,8 @@ test("default public execution tool definitions retain their compatibility hashe
 	const expected = {
 		web_search: "eb831762c218c50c43cedf765a984f6b1c46efb47ac9b7289dfbac4854112de4",
 		source_check: "48e69c75320f7a844a83bfe032c98b93ef11115e908831e6349915e708b16889",
-		fetch_content: "7ddcf471d87e90d74d9b2d274c38993320a906162d5e79e377536197ba250fbc",
+		// Deliberate request API addition: optional scalar provider with specialized-first semantics.
+		fetch_content: "cb07ea34fdef57db142d833438f9b586fadfc767f3c4df8763372fd3eb7774d0",
 		get_search_content: "e1c7597fc085a811c0c6fcde365a96571c275c70b93a48206a38be06a7a45a5f",
 	};
 	const tools = registered({}).tools.filter(tool => tool.name !== "web_enable");
@@ -209,4 +210,47 @@ test("README documents registration gates and toolNames", () => {
 	assert.match(readmeSrc, /"commands": \{/);
 	assert.match(readmeSrc, /Pi restart is required for tool and command registration changes/);
 	assert.match(readmeSrc, /`toolNames` can opt into alternate public tool names/);
+});
+
+test("fetch_content Pi registration offers scalar ordinary providers after specialized dispatch", () => {
+	const schema = registeredTool({}, "fetch_content").parameters.properties.provider;
+	assert.ok(schema, "fetch_content must expose provider");
+	assert.deepEqual(schema.enum, ["auto", "http", "firecrawl", "crawl4ai", "jina", "tinyfish", "search1api", "querit", "kagi", "ollama", "parallel", "parallel-mcp", "brightdata", "gemini", "tavily"]);
+	assert.match(schema.description, /specialized.*first/i);
+	assert.match(schema.description, /HTTP-first/);
+	assert.match(schema.description, /raw.*auth.*HTTP-only/i);
+	for (const provider of schema.enum) assert.equal(Value.Check(schema, provider), true, provider);
+	for (const provider of ["unknown", "all", null, ["http"], []]) assert.equal(Value.Check(schema, provider), false);
+	assert.equal(Value.Check(registeredTool({}, "fetch_content").parameters, { url: "https://example.com" }), true);
+});
+
+test("fetch_content output schema describes per-URL extraction provenance and actual ordered attempts", () => {
+	const schema = registeredTool({}, "fetch_content").outputSchema;
+	const urlSchema = schema.properties.urls.items;
+	for (const field of ["provider", "extractionProvider", "attempts"]) assert.ok(urlSchema.properties[field], field);
+	const base = { url: "https://example.com", title: "Example", content: "Content", error: null };
+	const ordinary = { ...base, provider: "firecrawl", attempts: [
+		{ provider: "http", outcome: "failed", error: "Page appears to be JavaScript-rendered" },
+		{ provider: "tavily", outcome: "failed", error: "Quota exhausted" },
+		{ provider: "firecrawl", outcome: "succeeded" },
+	] };
+	const specialized = { ...base, provider: null, extractionProvider: "github", attempts: [
+		{ provider: null, extractionProvider: "github", outcome: "succeeded" },
+	] };
+	const preflight = { ...base, content: "", error: "Provider is not configured", provider: null, extractionProvider: null, attempts: [] };
+	assert.equal(Value.Check(schema, { responseId: "batch", urls: [ordinary, specialized, preflight] }), true);
+	assert.equal(Value.Check(urlSchema, base), true, "unannotated results remain compatible until routing is connected");
+	for (const provider of ["http", "firecrawl", "crawl4ai", "jina", "tinyfish", "search1api", "querit", "kagi", "ollama", "parallel", "parallel-mcp", "brightdata", "gemini", "tavily"]) {
+		assert.equal(Value.Check(urlSchema, { ...base, provider, attempts: [{ provider, outcome: "succeeded" }] }), true, provider);
+	}
+	for (const invalid of [
+		{ provider: "auto" },
+		{ provider: "unknown" },
+		{ provider: ["http"] },
+		{ extractionProvider: 1 },
+		{ attempts: [{ provider: "http", outcome: "skipped" }] },
+		{ attempts: [{ provider: "http", outcome: "failed" }] },
+		{ attempts: [{ provider: "auto", outcome: "succeeded" }] },
+		{ attempts: [{ outcome: "succeeded" }] },
+	]) assert.equal(Value.Check(urlSchema, { ...base, ...invalid }), false, JSON.stringify(invalid));
 });

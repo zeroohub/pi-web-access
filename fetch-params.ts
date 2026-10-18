@@ -1,8 +1,10 @@
 import { normalizeProxyUrl } from "./utils.ts";
+import { FETCH_PROVIDERS, type FetchProviderSelection } from "./fetch-provider.ts";
 
 export interface FetchContentParams {
 	url?: unknown;
 	urls?: unknown;
+	provider?: unknown;
 	forceClone?: unknown;
 	prompt?: unknown;
 	timestamp?: unknown;
@@ -18,6 +20,7 @@ export interface FetchContentParams {
 export interface NormalizedFetchContentParams {
 	urlList: string[];
 	options: {
+		provider?: FetchProviderSelection;
 		forceClone?: boolean;
 		prompt?: string;
 		timestamp?: string;
@@ -37,6 +40,7 @@ export function normalizeFetchContentParams(params: FetchContentParams): Normali
 	const prompt = normalizeOptionalString(params.prompt);
 	const timestamp = normalizeOptionalString(params.timestamp);
 	const frames = normalizeOptionalFrameCount(params.frames);
+	const provider = normalizeProvider(params.provider);
 
 	const shouldIncludeFrames = frames !== undefined && (timestamp !== undefined || frames > 1);
 
@@ -51,6 +55,7 @@ export function normalizeFetchContentParams(params: FetchContentParams): Normali
 	return {
 		urlList,
 		options: {
+			...(provider !== undefined ? { provider } : {}),
 			...(forceClone !== undefined ? { forceClone } : {}),
 			...(prompt !== undefined ? { prompt } : {}),
 			...(timestamp !== undefined ? { timestamp } : {}),
@@ -80,6 +85,12 @@ function normalizeOptionalString(value: unknown): string | undefined {
 	if (typeof value !== "string") return undefined;
 	const trimmed = value.trim();
 	return trimmed || undefined;
+}
+
+function normalizeProvider(value: unknown): FetchProviderSelection | undefined {
+	if (value === undefined) return undefined;
+	if (value === "auto" || FETCH_PROVIDERS.some(provider => provider === value)) return value as FetchProviderSelection;
+	throw new Error(`provider must be "auto" or one of: ${FETCH_PROVIDERS.join(", ")}`);
 }
 
 function normalizeMode(value: unknown): "readable" | "raw" | "answer" | undefined {

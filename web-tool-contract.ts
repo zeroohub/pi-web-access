@@ -3,6 +3,7 @@
 // behavior lives in one place; each host keeps its own schemas and transport.
 
 import type { FindMode } from "./content-find.ts";
+import type { ExtractionProvenance, FetchProviderSelection } from "./fetch-provider.ts";
 import type { RecencyFilter } from "./source-check.ts";
 
 export type WebToolContent =
@@ -32,7 +33,7 @@ export type WebSearchStructuredContent = {
 
 export type FetchContentStructuredContent = {
 	responseId: string | null;
-	urls: Array<{ url: string; title: string; content: string; error: string | null; mimeType?: string; status?: number; duration?: number }>;
+	urls: Array<ExtractionProvenance & { url: string; title: string; content: string; error: string | null; mimeType?: string; status?: number; duration?: number }>;
 };
 
 export interface WebSearchCallParams {
@@ -50,6 +51,7 @@ export interface WebSearchCallParams {
 export interface FetchContentCallParams {
 	url?: string;
 	urls?: string[];
+	provider?: FetchProviderSelection;
 	mode?: string;
 	forceClone?: boolean;
 	proxy?: string;

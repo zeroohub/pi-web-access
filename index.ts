@@ -3,6 +3,7 @@ import { Box, Text, truncateToWidth, type KeyId } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { ExtractedContent } from "./extract.ts";
 import { normalizeFetchContentParams } from "./fetch-params.ts";
+import { FETCH_PROVIDERS, FETCH_PROVIDER_DESCRIPTION, type FetchProvider, type FetchProviderSelection } from "./fetch-provider.ts";
 import { answerFromPage } from "./page-query.ts";
 import { rewriteSearchQuery } from "./query-rewrite.ts";
 import { clearCloneCache, releaseClonesUnusedSince, touchClones } from "./github-extract.ts";
@@ -138,6 +139,26 @@ const webSearchOutputSchema = Type.Object({
 		results: Type.Array(Type.Object({ title: Type.String(), url: Type.String(), snippet: Type.String() })),
 	})),
 });
+const fetchProviderSchema = Type.Union([
+	StringEnum<FetchProvider[]>([...FETCH_PROVIDERS]),
+	Type.Null(),
+], { description: "Ordinary web-page route, or null for specialized extraction" });
+const extractionProviderSchema = Type.Union([Type.String(), Type.Null()], {
+	description: "Actual specialized extractor, not HTTP transport or the answer model",
+});
+const extractionAttemptSchema = Type.Union([
+	Type.Object({
+		provider: fetchProviderSchema,
+		extractionProvider: Type.Optional(extractionProviderSchema),
+		outcome: Type.Literal("succeeded"),
+	}, { additionalProperties: false }),
+	Type.Object({
+		provider: fetchProviderSchema,
+		extractionProvider: Type.Optional(extractionProviderSchema),
+		outcome: Type.Literal("failed"),
+		error: Type.String({ description: "Sanitized failure text without credentials, transport causes, or stacks" }),
+	}, { additionalProperties: false }),
+]);
 const fetchContentOutputSchema = Type.Object({
 	responseId: nullableString("Id of the stored content, null when nothing was stored"),
 	urls: Type.Array(Type.Object({
@@ -148,6 +169,11 @@ const fetchContentOutputSchema = Type.Object({
 		mimeType: Type.Optional(Type.String()),
 		status: Type.Optional(Type.Number()),
 		duration: Type.Optional(Type.Number()),
+		provider: Type.Optional({ ...fetchProviderSchema, description: "Successful ordinary web-page route, or null when none produced usable content" }),
+		extractionProvider: Type.Optional(extractionProviderSchema),
+		attempts: Type.Optional(Type.Array(extractionAttemptSchema, {
+			description: "Ordered extraction invocations; discovery/download and skipped or preflight-blocked routes are not attempts",
+		})),
 	})),
 });
 
@@ -1978,6 +2004,7 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({
 			url: Type.Optional(Type.String({ description: "Single URL to fetch" })),
 			urls: Type.Optional(Type.Array(Type.String(), { description: "Multiple URLs (parallel)" })),
+			provider: Type.Optional(StringEnum<FetchProviderSelection[]>(["auto", ...FETCH_PROVIDERS], { description: FETCH_PROVIDER_DESCRIPTION })),
 			forceClone: Type.Optional(Type.Boolean({
 				description: "Force cloning large GitHub repositories that exceed the size threshold",
 			})),
