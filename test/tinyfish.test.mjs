@@ -351,6 +351,12 @@ test("fetch_content uses TinyFish before Parallel after local and Jina extractio
 		title: "Rendered",
 		content: "# TinyFish rendered content",
 		error: null,
+		provider: "tinyfish",
+		attempts: [
+			{ provider: "http", outcome: "failed", error: "HTTP extraction failed" },
+			{ provider: "jina", outcome: "failed", error: "jina extraction failed" },
+			{ provider: "tinyfish", outcome: "succeeded" },
+		],
 	});
 });
 

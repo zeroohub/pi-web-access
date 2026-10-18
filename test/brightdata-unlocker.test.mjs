@@ -707,6 +707,12 @@ test("fetch_content tries Bright Data after the direct fetch and Jina Reader, an
 		title: "Unblocked",
 		content: "# Unblocked\n\nUnblocked body.",
 		error: null,
+		provider: "brightdata",
+		attempts: [
+			{ provider: "http", outcome: "failed", error: "HTTP extraction failed" },
+			{ provider: "jina", outcome: "failed", error: "jina extraction failed" },
+			{ provider: "brightdata", outcome: "succeeded" },
+		],
 	});
 });
 

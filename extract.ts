@@ -1,16 +1,19 @@
 import { existsSync, readFileSync } from "node:fs";
 import type TurndownService from "turndown";
 import pLimit from "p-limit";
+import { FETCH_PROVIDERS, type FetchProvider, type FetchProviderSelection, type ExtractionProvenance, type ExtractionAttempt } from "./fetch-provider.ts";
 import { activityMonitor } from "./activity.ts";
 import { extractRSCContent } from "./rsc-extract.ts";
-import { extractPDFToMarkdown, isPDF, loadPDFConfig } from "./pdf-extract.ts";
+import { extractPDFToMarkdown, getPDFExtractionAttempts, PDFProcessingLimitError, isPDF, loadPDFConfig } from "./pdf-extract.ts";
 import { extractGitHub, parseGitHubUrl } from "./github-extract.ts";
 import { extractGitHubIssuePr, parseGitHubIssuePrUrl } from "./github-issue-pr.ts";
 import { isYouTubeURL, isYouTubeEnabled, extractYouTube, extractYouTubeFrame, extractYouTubeFrames, getYouTubeStreamInfo } from "./youtube-extract.ts";
 import { CredentialResolutionError } from "./credential-source.ts";
+import { isGeminiApiAvailable, isGeminiApiAvailableWithVideo } from "./gemini-api.ts";
+import { isGeminiWebAvailable } from "./gemini-web.ts";
 import { extractWithUrlContext, extractWithGeminiWeb } from "./gemini-url-context.ts";
 import { extractWithParallel, isParallelAvailable } from "./parallel.ts";
-import { extractWithParallelMcp } from "./parallel-mcp.ts";
+import { extractWithParallelMcp, isParallelMcpAvailable } from "./parallel-mcp.ts";
 import { extractWithTinyFish, isTinyFishAvailable } from "./tinyfish.ts";
 import { extractWithSearch1API, isSearch1APIAvailable } from "./search1api.ts";
 import { extractWithQuerit, isQueritAvailable } from "./querit.ts";
@@ -66,11 +69,9 @@ function loadFetchTimeoutMs(): number {
 	return Math.max(1, timeoutMs);
 }
 
-const NON_RECOVERABLE_ERRORS = ["Unsupported content type", "Response too large", "PDF extraction is disabled", "Image fetching is disabled", "PDF provider paddleocr failed:", "PaddleOCR credential resolution failed:"];
+const NON_RECOVERABLE_ERRORS = ["Unsupported content type", "Response too large", "PDF extraction is disabled", "PDF exceeds configured pdf.maxSizeMB limit", "Image fetching is disabled", "PaddleOCR credential resolution failed:"];
 const MIN_USEFUL_CONTENT = 500;
 const SUPPORTED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
-const FETCH_PROVIDERS = ["http", "firecrawl", "crawl4ai", "jina", "tinyfish", "search1api", "querit", "kagi", "ollama", "parallel", "parallel-mcp", "brightdata", "gemini", "tavily"] as const;
-type FetchProvider = typeof FETCH_PROVIDERS[number];
 type FetchRouting = { providers: FetchProvider[]; allowRemoteHostedProviders: boolean };
 const DEFAULT_FETCH_PROVIDER_ORDER: FetchProvider[] = ["http", "firecrawl", "crawl4ai", "jina", "tinyfish", "search1api", "querit", "kagi", "ollama", "parallel", "brightdata", "gemini"];
 const REMOTE_HOSTED_FETCH_PROVIDERS = new Set<FetchProvider>(["jina", "tinyfish", "search1api", "querit", "kagi", "ollama", "parallel", "parallel-mcp", "brightdata", "gemini", "tavily"]);
@@ -154,6 +155,25 @@ function isRedirectPolicyError(message: string): boolean {
 		message === "Only HTTP and HTTPS URLs can be fetched remotely" ||
 		message === "URL must include a hostname" ||
 		message.startsWith("Failed to resolve ");
+}
+
+function isExtractionPreflightError(err: unknown): boolean {
+	const message = errorMessage(err);
+	return err instanceof CredentialResolutionError || isConfigParseError(err) ||
+		message.includes("credential resolution failed:") ||
+		(message.startsWith("Invalid ") && (message.includes(WEB_SEARCH_CONFIG_PATH) || message.startsWith("Invalid CIDR"))) ||
+		/^(?:Unsupported .*version|.* in .*web-search\.json (?:must|requires)|PDF provider .*requires)/.test(message);
+}
+
+function isFatalExtractionError(err: unknown): boolean {
+	const message = errorMessage(err).replace(/^GitHub REST fallback failed: /, "");
+	return isExtractionPreflightError(err) || isNonRecoverableHttpError(message);
+}
+
+function isGitHubSpecializationEnabled(section: "githubClone" | "githubPrIssue"): boolean {
+	if (!existsSync(WEB_SEARCH_CONFIG_PATH)) return true;
+	const config = JSON.parse(readFileSync(WEB_SEARCH_CONFIG_PATH, "utf-8"));
+	return config?.[section]?.enabled !== false;
 }
 
 // Errors that end routing: no other provider may be tried after them.
@@ -356,7 +376,7 @@ export interface VideoFrame {
 export type FrameData = { data: string; mimeType: string };
 export type FrameResult = FrameData | { error: string };
 
-export interface ExtractedContent {
+export interface ExtractedContent extends ExtractionProvenance {
 	url: string;
 	title: string;
 	content: string;
@@ -368,9 +388,10 @@ export interface ExtractedContent {
 	status?: number;
 }
 
-type HttpExtractedContent = ExtractedContent & { declaredLinks?: DeclaredWebLink[] };
+type HttpExtractedContent = ExtractedContent & { declaredLinks?: DeclaredWebLink[]; terminal?: boolean };
 
 export interface ExtractOptions {
+	provider?: FetchProviderSelection;
 	timeoutMs?: number;
 	forceClone?: boolean;
 	prompt?: string;
@@ -550,11 +571,49 @@ function safeVideoInfo(url: string): LocalVideoInfoResult {
 	}
 }
 
+type DispatchProvenance = {
+	attempts: ExtractionAttempt[];
+	earlyExtractionProvider?: "youtube" | "local-video";
+};
+
 export async function extractContent(
 	url: string,
 	signal?: AbortSignal,
 	options?: ExtractOptions,
 ): Promise<ExtractedContent> {
+	const attempts: ExtractionAttempt[] = [];
+	const selected = options?.provider;
+	let validationError: string | null = null;
+	if (selected !== undefined && selected !== "auto" && !FETCH_PROVIDERS.includes(selected as FetchProvider)) {
+		validationError = "Invalid fetch provider selection";
+	} else if (selected && selected !== "auto" && selected !== "http" && (options?.mode === "raw" || options?.authFetchProfile)) {
+		validationError = "Raw and authenticated fetching require provider http or auto";
+	} else if (options?.forceClone && !parseGitHubUrl(url)) {
+		validationError = "forceClone only works with GitHub repository URLs";
+	} else if (options?.model && !isYouTubeURL(url).isYouTube && safeVideoInfo(url).status !== "video") {
+		validationError = "model only works with YouTube and local video files";
+	}
+	if (validationError) return { url, title: "", content: "", error: validationError, provider: null, attempts };
+	const provenance: DispatchProvenance = { attempts };
+	const { terminal: _terminal, declaredLinks: _declaredLinks, ...extracted } = await dispatchContent(url, signal, options, provenance) as HttpExtractedContent;
+	const result = signal?.aborted ? abortedResult(url) : extracted;
+	const extractionProvider = provenance.earlyExtractionProvider;
+	if (extractionProvider && !isFatalExtractionError(result.error ?? "")) {
+		attempts.push(result.error
+			? { provider: null, extractionProvider, outcome: "failed", error: `${extractionProvider} extraction failed` }
+			: { provider: null, extractionProvider, outcome: "succeeded" });
+		if (!result.error) result.extractionProvider = extractionProvider;
+	}
+	return { ...result, provider: result.provider ?? null, attempts };
+}
+
+async function dispatchContent(
+	url: string,
+	signal: AbortSignal | undefined,
+	options: ExtractOptions | undefined,
+	provenance: DispatchProvenance,
+): Promise<ExtractedContent> {
+	const { attempts } = provenance;
 	if (signal?.aborted) {
 		return { url, title: "", content: "", error: "Aborted" };
 	}
@@ -593,7 +652,9 @@ export async function extractContent(
 
 	if (options?.authFetchProfile || options?.mode === "raw") {
 		try {
-			return await extractViaHttp(url, resolveFetchTimeoutMs(options), signal, options);
+			const result = await extractViaHttp(url, resolveFetchTimeoutMs(options), signal, options);
+			attempts.push(...(result.attempts ?? []));
+			return result;
 		} catch (err) {
 			return { url, title: "", content: "", error: errorMessage(err) };
 		}
@@ -606,6 +667,13 @@ export async function extractContent(
 	}
 
 	if (options?.frames || options?.timestamp) {
+		try {
+			if (isYouTubeURL(url).isYouTube && !isYouTubeEnabled()) {
+				return { url, title: "", content: "", error: "YouTube extraction is disabled by youtube.enabled" };
+			}
+		} catch (err) {
+			return { url, title: "", content: "", error: errorMessage(err) };
+		}
 		const disabled = imageGateError();
 		if (disabled) return { url, title: "", content: "", error: disabled };
 	}
@@ -624,6 +692,7 @@ export async function extractContent(
 			}
 			const dur = Math.floor(streamInfo.duration);
 			const timestamps = computeRangeTimestamps(0, dur, frameCount);
+			provenance.earlyExtractionProvider = "youtube";
 			const result = await extractYouTubeFrames(ytInfo.videoId, timestamps, streamInfo);
 			const label = `${formatSeconds(0)}-${formatSeconds(dur)}`;
 			return buildFrameResult(url, label, timestamps.length, result.frames, result.error, streamInfo.duration);
@@ -640,6 +709,7 @@ export async function extractContent(
 			}
 			const dur = Math.floor(durationResult);
 			const timestamps = computeRangeTimestamps(0, dur, frameCount);
+			provenance.earlyExtractionProvider = "local-video";
 			const result = await extractLocalFrames(localVideo.info.absolutePath, timestamps);
 			const label = `${formatSeconds(0)}-${formatSeconds(dur)}`;
 			return buildFrameResult(url, label, timestamps.length, result.frames, result.error, durationResult);
@@ -685,6 +755,7 @@ export async function extractContent(
 				const timestamps = frameCount
 					? computeRangeTimestamps(spec.start, spec.end, frameCount)
 					: computeRangeTimestamps(spec.start, spec.end);
+				provenance.earlyExtractionProvider = "youtube";
 				const result = await extractYouTubeFrames(ytInfo.videoId, timestamps, streamInfo);
 				return buildFrameResult(url, label, timestamps.length, result.frames, result.error, result.duration ?? undefined);
 			}
@@ -697,6 +768,7 @@ export async function extractContent(
 					return { url, title: `Frames ${label}`, content: error, error };
 				}
 				const timestamps = computeRangeTimestamps(spec.seconds, end, frameCount);
+				provenance.earlyExtractionProvider = "youtube";
 				const result = await extractYouTubeFrames(ytInfo.videoId, timestamps, streamInfo);
 				return buildFrameResult(url, label, timestamps.length, result.frames, result.error, result.duration ?? undefined);
 			}
@@ -705,6 +777,7 @@ export async function extractContent(
 				const error = `Timestamp ${formatSeconds(spec.seconds)} exceeds video duration (${formatSeconds(Math.floor(streamInfo.duration))})`;
 				return { url, title: `Frame at ${options.timestamp}`, content: error, error };
 			}
+			provenance.earlyExtractionProvider = "youtube";
 			const frame = await extractYouTubeFrame(ytInfo.videoId, spec.seconds, streamInfo);
 			if ("error" in frame) {
 				return { url, title: `Frame at ${options.timestamp}`, content: frame.error, error: frame.error };
@@ -723,6 +796,7 @@ export async function extractContent(
 				const timestamps = frameCount
 					? computeRangeTimestamps(spec.start, spec.end, frameCount)
 					: computeRangeTimestamps(spec.start, spec.end);
+				provenance.earlyExtractionProvider = "local-video";
 				const result = await extractLocalFrames(localVideo.info.absolutePath, timestamps);
 				const label = `${formatSeconds(spec.start)}-${formatSeconds(spec.end)}`;
 				return buildFrameResult(url, label, timestamps.length, result.frames, result.error);
@@ -731,11 +805,13 @@ export async function extractContent(
 			if (frameCount) {
 				const end = spec.seconds + (frameCount - 1) * MIN_FRAME_INTERVAL;
 				const timestamps = computeRangeTimestamps(spec.seconds, end, frameCount);
+				provenance.earlyExtractionProvider = "local-video";
 				const result = await extractLocalFrames(localVideo.info.absolutePath, timestamps);
 				const label = `${formatSeconds(spec.seconds)}-${formatSeconds(end)}`;
 				return buildFrameResult(url, label, timestamps.length, result.frames, result.error);
 			}
 
+			provenance.earlyExtractionProvider = "local-video";
 			const frame = await extractVideoFrame(localVideo.info.absolutePath, spec.seconds);
 			if ("error" in frame) {
 				return { url, title: `Frame at ${options.timestamp}`, content: frame.error, error: frame.error };
@@ -752,6 +828,9 @@ export async function extractContent(
 	}
 	if (localVideo.status === "video") {
 		try {
+			if (localVideo.info.withinUploadLimit && (isGeminiApiAvailableWithVideo() || await isGeminiWebAvailable())) {
+				provenance.earlyExtractionProvider = "local-video";
+			}
 			const result = await extractVideo(localVideo.info, signal, options);
 			if (signal?.aborted) return abortedResult(url);
 			return result ?? { url, title: "", content: "", error: `Video analysis requires Gemini access. Either:\n  1. Sign into gemini.google.com in Chrome (free, uses cookies)\n  2. Set GEMINI_API_KEY in ${WEB_SEARCH_CONFIG_PATH}` };
@@ -766,54 +845,55 @@ export async function extractContent(
 	} catch (err) {
 		return { url, title: "", content: "", error: errorMessage(err) };
 	}
-
-	try {
-		const ghIssuePrResult = await extractGitHubIssuePr(url, signal, options);
-		if (ghIssuePrResult) return ghIssuePrResult;
-		if (signal?.aborted) return abortedResult(url);
-	} catch (err) {
-		const message = errorMessage(err);
-		if (isAbortError(err)) return abortedResult(url);
-		if (isConfigParseError(err)) {
-			return { url, title: "", content: "", error: message };
-		}
+	if (!remoteUrl) {
+		return { url, title: "", content: "", error: "Only HTTP and HTTPS URLs can be fetched remotely" };
 	}
 
-	try {
-		const ghResult = await extractGitHub(url, signal, options?.forceClone);
-		if (ghResult) return ghResult;
-		if (signal?.aborted) return abortedResult(url);
-	} catch (err) {
-		const message = errorMessage(err);
-		if (isAbortError(err)) return abortedResult(url);
-		if (isConfigParseError(err)) {
-			return { url, title: "", content: "", error: message };
+	let specializedError: string | null = null;
+	let specializedFailure: ExtractedContent | null = null;
+	const runSpecialized = async (
+		extractionProvider: string,
+		extract: () => Promise<ExtractedContent | null>,
+	): Promise<ExtractedContent | null> => {
+		try {
+			const result = await extract();
+			if (signal?.aborted || result?.error === "Aborted") {
+				attempts.push({ provider: null, extractionProvider, outcome: "failed", error: "Aborted" });
+				return abortedResult(url);
+			}
+			if (result && !result.error) {
+				attempts.push({ provider: null, extractionProvider, outcome: "succeeded" });
+				return { ...result, provider: null, extractionProvider };
+			}
+			if (result?.error && isExtractionPreflightError(result.error)) return result;
+			attempts.push({ provider: null, extractionProvider, outcome: "failed", error: `${extractionProvider} extraction failed` });
+			if (result?.error && isFatalExtractionError(result.error)) return result;
+			specializedError = result?.error ?? `${extractionProvider} extraction failed`;
+			if (result?.error && result.content) specializedFailure = result;
+		} catch (err) {
+			if (isExtractionPreflightError(err)) return { url, title: "", content: "", error: errorMessage(err) };
+			attempts.push({ provider: null, extractionProvider, outcome: "failed", error: `${extractionProvider} extraction failed` });
+			if (signal?.aborted || isAbortError(err)) return abortedResult(url);
+			if (isFatalExtractionError(err)) return { url, title: "", content: "", error: errorMessage(err) };
+			specializedError = errorMessage(err);
 		}
-	}
-
-	const ytInfo = isYouTubeURL(url);
-	let youtubeEnabled = false;
+		return null;
+	};
 	try {
-		youtubeEnabled = isYouTubeEnabled();
+		if (parseGitHubIssuePrUrl(url) && isGitHubSpecializationEnabled("githubPrIssue")) {
+			const result = await runSpecialized("github", () => extractGitHubIssuePr(url, signal, options));
+			if (result) return result;
+		}
+		if (parseGitHubUrl(url) && isGitHubSpecializationEnabled("githubClone")) {
+			const result = await runSpecialized("github", () => extractGitHub(url, signal, options?.forceClone));
+			if (result) return result;
+		}
+		if (isYouTubeURL(url).isYouTube && isYouTubeEnabled()) {
+			const result = await runSpecialized("youtube", () => extractYouTube(url, signal, options?.prompt, options?.model));
+			if (result) return result;
+		}
 	} catch (err) {
 		return { url, title: "", content: "", error: errorMessage(err) };
-	}
-	if (ytInfo.isYouTube && youtubeEnabled) {
-		try {
-			const ytResult = await extractYouTube(url, signal, options?.prompt, options?.model);
-			if (ytResult) return ytResult;
-			if (signal?.aborted) return abortedResult(url);
-		} catch (err) {
-			const message = errorMessage(err);
-			if (isAbortError(err)) return abortedResult(url);
-			return { url, title: "", content: "", error: message };
-		}
-		return {
-			url,
-			title: "",
-			content: "",
-			error: "Could not extract YouTube video content. Sign into Google in a supported Chromium browser for automatic access, or set GEMINI_API_KEY.",
-		};
 	}
 
 	if (signal?.aborted) return abortedResult(url);
@@ -831,14 +911,16 @@ export async function extractContent(
 	} catch (err) {
 		return { url, title: "", content: "", error: errorMessage(err) };
 	}
-	if (redirectPolicy === "same-origin" && !fetchRouting.providers.includes("http")) {
+	if ((!options?.provider || options.provider === "auto") && redirectPolicy === "same-origin" && !fetchRouting.providers.includes("http")) {
 		return redirectPolicyRouteRefusal(url, fetchRouting.providers[0]!);
 	}
-	const providerOrder: FetchProvider[] = redirectPolicy === "same-origin"
+	const explicitProvider = options?.provider && options.provider !== "auto" ? options.provider : undefined;
+	const configuredOrder = explicitProvider ? [explicitProvider] : fetchRouting.providers;
+	const providerOrder: FetchProvider[] = explicitProvider ? [explicitProvider] : redirectPolicy === "same-origin"
 		? ["http"]
 		: remoteUrl && !fetchRouting.allowRemoteHostedProviders
-			? fetchRouting.providers.filter(provider => !REMOTE_HOSTED_FETCH_PROVIDERS.has(provider))
-			: fetchRouting.providers;
+			? configuredOrder.filter(provider => !REMOTE_HOSTED_FETCH_PROVIDERS.has(provider))
+			: configuredOrder;
 	if (providerOrder.length === 0) {
 		return {
 			url,
@@ -850,252 +932,121 @@ export async function extractContent(
 
 	let httpResult: ExtractedContent | null = null;
 	let declaredLinks: DeclaredWebLink[] = [];
+	let activeProvider: FetchProvider = "http";
 	const withDeclaredLinks = (result: ExtractedContent): ExtractedContent => ({
 		...result,
+		provider: activeProvider,
 		content: appendDeclaredWebLinks(result.content, declaredLinks),
 	});
 	const parseErrorResult = (message: string): ExtractedContent => httpResult
 		? { ...httpResult, error: message }
 		: { url, title: "", content: "", error: message };
 	const runHttpProvider = async (): Promise<ExtractedContent | null> => {
-		const { declaredLinks: discoveredLinks = [], ...result } = await extractViaHttp(url, fetchTimeoutMs, signal, options);
+		const { declaredLinks: discoveredLinks = [], terminal, ...result } = await extractViaHttp(url, fetchTimeoutMs, signal, options);
 		httpResult = result;
+		attempts.push(...(httpResult.attempts ?? []));
 		declaredLinks = discoveredLinks;
 		if (signal?.aborted) return abortedResult(url);
-		if (!httpResult.error) return httpResult;
-		if (isNonRecoverableHttpError(httpResult.error) || httpResult.error === options?.rejectDirectImages) {
+		if (!httpResult.error && (!explicitProvider || explicitProvider === "http" || httpResult.extractionProvider)) return httpResult;
+		if (terminal || isNonRecoverableHttpError(httpResult.error) || httpResult.error === options?.rejectDirectImages) {
 			return httpResult;
 		}
 		return null;
 	};
 
-	let firecrawlError: string | null = null;
-	let crawl4aiError: string | null = null;
-	let tinyfishError: string | null = null;
-	let search1apiError: string | null = null;
-	let queritError: string | null = null;
-	let tavilyError: string | null = null;
-	let kagiError: string | null = null;
-	let ollamaError: string | null = null;
-	let parallelError: string | null = null;
-	let parallelMcpError: string | null = null;
-	let brightdataError: string | null = null;
+	const providerErrors: Partial<Record<FetchProvider, string>> = {};
+	// Discovery and local page extraction share this guarded response. HTTP is
+	// never revisited through a later entry in the automatic provider list.
+	if (remoteUrl) {
+		const result = await runHttpProvider();
+		if (result) return result;
+		if (explicitProvider === "http") return specializedFailure ?? httpResult!;
+	}
 
-	if (remoteUrl && providerOrder[0] !== "http") {
-		const httpGateResult = await runHttpProvider();
-		if (httpGateResult) return httpGateResult;
+	if (explicitProvider && explicitProvider !== "http") {
+		if (redirectPolicy === "same-origin") return redirectPolicyRouteRefusal(url, explicitProvider);
+		if (remoteUrl && !fetchRouting.allowRemoteHostedProviders && REMOTE_HOSTED_FETCH_PROVIDERS.has(explicitProvider)) {
+			return { url, title: "", content: "", error: "Remote hosted fetch providers are disabled unless fetchRouting.allowRemoteHostedProviders is true" };
+		}
 	}
 
 	for (const provider of providerOrder) {
 		if (signal?.aborted) return abortedResult(url);
-
-		if (provider === "http") {
-			const result = await runHttpProvider();
-			if (result) return result;
-			continue;
-		}
-
-		if (provider === "firecrawl") {
-			try {
-				if (isFirecrawlAvailable()) {
-					const ssrf = loadSsrfConfig();
-					const firecrawlResult = await extractWithFirecrawl(url, signal, {
-						timeoutMs: options?.timeoutMs,
-						...(options?.lookup ? { lookup: options.lookup } : {}),
-						ssrf,
-					});
-					if (firecrawlResult) return withDeclaredLinks(firecrawlResult);
-				}
-			} catch (err) {
-				if (isAbortError(err)) return abortedResult(url);
-				firecrawlError = errorMessage(err);
-				if (isConfigParseError(err)) return parseErrorResult(firecrawlError);
+		if (provider === "http") continue;
+		activeProvider = provider;
+		let invoked = false;
+		try {
+			let available: boolean;
+			switch (provider) {
+				case "firecrawl": available = isFirecrawlAvailable(); break;
+				case "crawl4ai": available = isCrawl4aiAvailable(); break;
+				case "jina": available = true; break;
+				case "tinyfish": available = isTinyFishAvailable(); break;
+				case "search1api": available = isSearch1APIAvailable(); break;
+				case "querit": available = isQueritAvailable(); break;
+				case "tavily": available = isTavilyAvailable(); break;
+				case "kagi": available = isKagiExtractAvailable(); break;
+				case "ollama": available = isOllamaFetchAvailable(); break;
+				case "parallel": available = isParallelAvailable(); break;
+				case "parallel-mcp": available = isParallelMcpAvailable(); break;
+				case "brightdata": available = isBrightDataUnlockerAvailable(); break;
+				case "gemini": available = isGeminiApiAvailable() || Boolean(await isGeminiWebAvailable()); break;
 			}
-			continue;
-		}
-
-		if (provider === "crawl4ai") {
-			try {
-				if (isCrawl4aiAvailable()) {
-					const ssrf = loadSsrfConfig();
-					const crawl4aiResult = await extractWithCrawl4ai(url, signal, {
-						timeoutMs: options?.timeoutMs,
-						...(options?.lookup ? { lookup: options.lookup } : {}),
-						ssrf,
-					});
-					if (crawl4aiResult) return withDeclaredLinks(crawl4aiResult);
-				}
-			} catch (err) {
-				if (signal?.aborted || isAbortException(err)) return abortedResult(url);
-				crawl4aiError = errorMessage(err);
-				if (isConfigParseError(err)) return parseErrorResult(crawl4aiError);
+			if (!available) {
+				if (explicitProvider) return parseErrorResult(`Fetch provider ${provider} is unavailable; configure its credentials or endpoint`);
+				continue;
 			}
-			continue;
-		}
-
-		if (provider === "jina") {
-			const jinaResult = await extractWithJinaReader(url, fetchTimeoutMs, signal, options?.lookup);
-			if (jinaResult) return withDeclaredLinks(jinaResult);
-			continue;
-		}
-
-		if (provider === "tinyfish") {
-			try {
-				if (isTinyFishAvailable()) {
-					const tinyfishResult = await extractWithTinyFish(url, signal, options);
-					if (tinyfishResult) return withDeclaredLinks(tinyfishResult);
-				}
-			} catch (err) {
-				if (isAbortError(err)) return abortedResult(url);
-				tinyfishError = errorMessage(err);
-				if (isConfigParseError(err)) return parseErrorResult(tinyfishError);
+			if (signal?.aborted) return abortedResult(url);
+			const guardedOptions = { timeoutMs: options?.timeoutMs, lookup: options?.lookup, ssrf: loadSsrfConfig() };
+			invoked = true;
+			let result: ExtractedContent | null;
+			switch (provider) {
+				case "firecrawl": result = await extractWithFirecrawl(url, signal, guardedOptions); break;
+				case "crawl4ai": result = await extractWithCrawl4ai(url, signal, guardedOptions); break;
+				case "jina": result = await extractWithJinaReader(url, fetchTimeoutMs, signal, options?.lookup); break;
+				case "tinyfish": result = await extractWithTinyFish(url, signal, options); break;
+				case "search1api": result = await extractWithSearch1API(url, signal, options); break;
+				case "querit": result = await extractWithQuerit(url, signal, options); break;
+				case "tavily": result = await extractWithTavily(url, signal, { ...options, timeoutMs: fetchTimeoutMs }); break;
+				case "kagi": result = await extractWithKagi(url, signal, guardedOptions); break;
+				case "ollama": result = await extractWithOllama(url, signal, guardedOptions); break;
+				case "parallel": result = await extractWithParallel(url, signal, options); break;
+				case "parallel-mcp": result = await extractWithParallelMcp(url, signal, options); break;
+				case "brightdata": result = await extractWithBrightDataUnlocker(url, signal, guardedOptions); break;
+				case "gemini": result = await extractWithUrlContext(url, signal) ?? await extractWithGeminiWeb(url, signal); break;
 			}
-			continue;
-		}
-
-		if (provider === "search1api") {
-			try {
-				if (isSearch1APIAvailable()) {
-					const search1apiResult = await extractWithSearch1API(url, signal, options);
-					if (search1apiResult) return withDeclaredLinks(search1apiResult);
-				}
-			} catch (err) {
-				if (isAbortError(err)) return abortedResult(url);
-				search1apiError = errorMessage(err);
-				if (isConfigParseError(err)) return parseErrorResult(search1apiError);
+			if (signal?.aborted) {
+				attempts.push({ provider, outcome: "failed", error: "Aborted" });
+				return abortedResult(url);
 			}
-			continue;
-		}
-
-		if (provider === "querit") {
-			try {
-				if (isQueritAvailable()) {
-					const queritResult = await extractWithQuerit(url, signal, options);
-					if (queritResult) return withDeclaredLinks(queritResult);
-				}
-			} catch (err) {
-				if (isAbortError(err)) return abortedResult(url);
-				queritError = errorMessage(err);
-				if (isConfigParseError(err)) return parseErrorResult(queritError);
+			if (result && !result.error) {
+				attempts.push({ provider, outcome: "succeeded" });
+				return withDeclaredLinks(result);
 			}
-			continue;
-		}
-
-		if (provider === "tavily") {
-			try {
-				if (isTavilyAvailable()) {
-					const result = await extractWithTavily(url, signal, { ...options, timeoutMs: fetchTimeoutMs });
-					if (result) return withDeclaredLinks(result);
-				}
-			} catch (err) {
-				if (isAbortError(err)) return abortedResult(url);
-				tavilyError = errorMessage(err);
-				if (err instanceof CredentialResolutionError || isConfigParseError(err)) return parseErrorResult(tavilyError);
+			attempts.push({ provider, outcome: "failed", error: `${provider} extraction failed` });
+			if (result?.error) providerErrors[provider] = result.error;
+		} catch (err) {
+			if (isExtractionPreflightError(err)) return parseErrorResult(errorMessage(err));
+			if (invoked) attempts.push({ provider, outcome: "failed", error: `${provider} extraction failed` });
+			if (signal?.aborted || isAbortException(err) || (provider !== "crawl4ai" && isAbortError(err))) return abortedResult(url);
+			providerErrors[provider] = errorMessage(err);
+			if (isFatalExtractionError(err)) {
+				const message = provider === "brightdata" ? `Bright Data fallback failed: ${errorMessage(err)}` : errorMessage(err);
+				return parseErrorResult(message);
 			}
-			continue;
-		}
-
-		if (provider === "kagi") {
-			try {
-				if (isKagiExtractAvailable()) {
-					const ssrf = loadSsrfConfig();
-					const kagiResult = await extractWithKagi(url, signal, {
-						timeoutMs: options?.timeoutMs,
-						...(options?.lookup ? { lookup: options.lookup } : {}),
-						ssrf,
-					});
-					if (kagiResult) return withDeclaredLinks(kagiResult);
-				}
-			} catch (err) {
-				if (isAbortError(err)) return abortedResult(url);
-				kagiError = errorMessage(err);
-				if (isConfigParseError(err)) return parseErrorResult(kagiError);
-			}
-			continue;
-		}
-
-		if (provider === "ollama") {
-			try {
-				if (isOllamaFetchAvailable()) {
-					const ssrf = loadSsrfConfig();
-					const ollamaResult = await extractWithOllama(url, signal, {
-						timeoutMs: options?.timeoutMs,
-						...(options?.lookup ? { lookup: options.lookup } : {}),
-						ssrf,
-					});
-					if (ollamaResult) return withDeclaredLinks(ollamaResult);
-				}
-			} catch (err) {
-				if (isAbortError(err)) return abortedResult(url);
-				ollamaError = errorMessage(err);
-				if (isConfigParseError(err)) return parseErrorResult(ollamaError);
-			}
-			continue;
-		}
-
-		if (provider === "parallel") {
-			try {
-				if (isParallelAvailable()) {
-					const parallelResult = await extractWithParallel(url, signal, options);
-					if (parallelResult) return withDeclaredLinks(parallelResult);
-				}
-			} catch (err) {
-				if (isAbortError(err)) return abortedResult(url);
-				parallelError = errorMessage(err);
-				if (isConfigParseError(err)) return parseErrorResult(parallelError);
-			}
-			continue;
-		}
-
-		if (provider === "parallel-mcp") {
-			try {
-				const parallelMcpResult = await extractWithParallelMcp(url, signal, options);
-				if (parallelMcpResult) return withDeclaredLinks(parallelMcpResult);
-			} catch (err) {
-				if (isAbortError(err)) return abortedResult(url);
-				parallelMcpError = errorMessage(err);
-				if (isConfigParseError(err)) return parseErrorResult(parallelMcpError);
-			}
-			continue;
-		}
-
-		if (provider === "brightdata") {
-			try {
-				if (isBrightDataUnlockerAvailable()) {
-					const ssrf = loadSsrfConfig();
-					const brightdataResult = await extractWithBrightDataUnlocker(url, signal, {
-						timeoutMs: options?.timeoutMs,
-						...(options?.lookup ? { lookup: options.lookup } : {}),
-						ssrf,
-					});
-					if (brightdataResult) return withDeclaredLinks(brightdataResult);
-				}
-			} catch (err) {
-				if (isAbortError(err)) return abortedResult(url);
-				brightdataError = errorMessage(err);
-				if (isConfigParseError(err)) return parseErrorResult(brightdataError);
-			}
-			continue;
-		}
-
-		if (provider === "gemini") {
-			let geminiResult: ExtractedContent | null = null;
-			try {
-				geminiResult = await extractWithUrlContext(url, signal)
-					?? await extractWithGeminiWeb(url, signal);
-			} catch (err) {
-				if (isAbortError(err)) return abortedResult(url);
-				if (err instanceof CredentialResolutionError || isConfigParseError(err)) {
-					return parseErrorResult(errorMessage(err));
-				}
-			}
-			if (geminiResult) return withDeclaredLinks(geminiResult);
 		}
 	}
 
 	if (signal?.aborted) return abortedResult(url);
 	const finalHttpResult = httpResult as ExtractedContent | null;
-	if (finalHttpResult && declaredLinks.length > 0) return { ...finalHttpResult, error: null };
+	if (!explicitProvider && finalHttpResult && declaredLinks.length > 0) {
+		const httpAttempt = attempts.findIndex(attempt => attempt.provider === "http");
+		if (httpAttempt >= 0) attempts[httpAttempt] = { provider: "http", outcome: "succeeded" };
+		return { ...finalHttpResult, provider: "http", error: null };
+	}
+	const finalSpecializedFailure = specializedFailure as ExtractedContent | null;
+	if (finalSpecializedFailure) return { ...finalSpecializedFailure, provider: null, extractionProvider: undefined };
+	if (explicitProvider) return parseErrorResult(providerErrors[explicitProvider] ?? `${explicitProvider} extraction failed`);
 
 	// A definitive 404/410 from the origin means no extraction provider can
 	// retrieve the page, so the provider-configuration checklist below would
@@ -1109,18 +1060,19 @@ export async function extractContent(
 	const searchToolName = options?.toolNames?.webSearch;
 	const jinaHint = jinaReaderGuidance(fetchRouting, providerOrder, Boolean(remoteUrl) && !fetchRouting.allowRemoteHostedProviders);
 	const guidance = [
+		...(specializedError ? [specializedError] : []),
 		finalHttpResult?.error ?? "No fetch_content provider returned content",
-		...(firecrawlError ? [`Firecrawl fallback failed: ${firecrawlError}`] : []),
-		...(crawl4aiError ? [`Crawl4AI fallback failed: ${crawl4aiError}`] : []),
-		...(tinyfishError ? [`TinyFish fallback failed: ${tinyfishError}`] : []),
-		...(search1apiError ? [`Search1API fallback failed: ${search1apiError}`] : []),
-		...(queritError ? [`Querit fallback failed: ${queritError}`] : []),
-		...(tavilyError ? [`Tavily fallback failed: ${tavilyError}`] : []),
-		...(kagiError ? [`Kagi fallback failed: ${kagiError}`] : []),
-		...(ollamaError ? [`Ollama fallback failed: ${ollamaError}`] : []),
-		...(parallelError ? [`Parallel fallback failed: ${parallelError}`] : []),
-		...(parallelMcpError ? [`Parallel MCP fallback failed: ${parallelMcpError}`] : []),
-		...(brightdataError ? [`Bright Data fallback failed: ${brightdataError}`] : []),
+		...(providerErrors["firecrawl"] ? [`Firecrawl fallback failed: ${providerErrors["firecrawl"]}`] : []),
+		...(providerErrors["crawl4ai"] ? [`Crawl4AI fallback failed: ${providerErrors["crawl4ai"]}`] : []),
+		...(providerErrors["tinyfish"] ? [`TinyFish fallback failed: ${providerErrors["tinyfish"]}`] : []),
+		...(providerErrors["search1api"] ? [`Search1API fallback failed: ${providerErrors["search1api"]}`] : []),
+		...(providerErrors["querit"] ? [`Querit fallback failed: ${providerErrors["querit"]}`] : []),
+		...(providerErrors["tavily"] ? [`Tavily fallback failed: ${providerErrors["tavily"]}`] : []),
+		...(providerErrors["kagi"] ? [`Kagi fallback failed: ${providerErrors["kagi"]}`] : []),
+		...(providerErrors["ollama"] ? [`Ollama fallback failed: ${providerErrors["ollama"]}`] : []),
+		...(providerErrors["parallel"] ? [`Parallel fallback failed: ${providerErrors["parallel"]}`] : []),
+		...(providerErrors["parallel-mcp"] ? [`Parallel MCP fallback failed: ${providerErrors["parallel-mcp"]}`] : []),
+		...(providerErrors["brightdata"] ? [`Bright Data fallback failed: ${providerErrors["brightdata"]}`] : []),
 		"",
 		"Fallback options:",
 		...(jinaHint ? [jinaHint] : []),
@@ -1259,6 +1211,25 @@ async function extractViaHttp(
 	options?: ExtractOptions,
 	preferMarkdown = options?.mode !== "raw",
 ): Promise<HttpExtractedContent> {
+	const state: { invoked: boolean; attempts?: ExtractionAttempt[] } = { invoked: false };
+	const result = await extractHttpResource(url, timeoutMs, state, signal, options, preferMarkdown);
+	return {
+		...result,
+		provider: result.provider ?? (!result.error && state.invoked ? "http" : null),
+		attempts: state.attempts ?? result.attempts ?? (state.invoked ? [
+			result.error ? { provider: "http", outcome: "failed", error: "HTTP extraction failed" } : { provider: "http", outcome: "succeeded" },
+		] : []),
+	};
+}
+
+async function extractHttpResource(
+	url: string,
+	timeoutMs: number,
+	state: { invoked: boolean; attempts?: ExtractionAttempt[] },
+	signal: AbortSignal | undefined,
+	options: ExtractOptions | undefined,
+	preferMarkdown: boolean,
+): Promise<HttpExtractedContent> {
 	const activityId = activityMonitor.logStart({ type: "fetch", url });
 
 	const controller = new AbortController();
@@ -1303,14 +1274,19 @@ async function extractViaHttp(
 				},
 			);
 
+		const discoveryOnly = options?.provider && options.provider !== "auto" && options.provider !== "http";
 		if (!response.ok && options?.mode !== "raw") {
+			const knownPDF = isPDF(url, response.headers.get("content-type") ?? "");
+			state.invoked = !discoveryOnly && !knownPDF;
+			await response.body?.cancel();
 			activityMonitor.logComplete(activityId, response.status);
 			return {
 				url,
 				title: "",
 				content: "",
-				error: `HTTP ${response.status}: ${response.statusText}`,
+				error: `HTTP ${response.status}: ${response.statusText}${knownPDF ? ". PDF web-provider fallback cannot preserve the validated bytes and size limit" : ""}`,
 				status: response.status,
+				...(knownPDF ? { terminal: true, attempts: [] } : {}),
 			};
 		}
 
@@ -1321,7 +1297,7 @@ async function extractViaHttp(
 		const pdfConfig = isPDFContent ? loadPDFConfig() : null;
 		if (isPDFContent && pdfConfig && !pdfConfig.enabled) {
 			activityMonitor.logComplete(activityId, response.status);
-			return { url, title: "", content: "", error: "PDF extraction is disabled by pdf.enabled", mimeType, status: response.status };
+			return { url, title: "", content: "", error: "PDF extraction is disabled by pdf.enabled", attempts: [], mimeType, status: response.status };
 		}
 		const maxResponseSize = (pdfConfig?.maxSizeMB ?? 5) * 1024 * 1024;
 		if (contentLengthHeader) {
@@ -1332,6 +1308,7 @@ async function extractViaHttp(
 					url,
 					title: "",
 					content: "",
+					...(pdfConfig ? { attempts: [] } : {}),
 					error: pdfConfig
 						? pdfSizeLimitError(pdfConfig.maxSizeMB).message
 						: `Response too large (${Math.round(contentLength / 1024 / 1024)}MB)`,
@@ -1340,6 +1317,7 @@ async function extractViaHttp(
 		}
 
 		if (options?.mode === "raw") {
+			state.invoked = true;
 			if (!isTextContentType(contentType)) {
 				activityMonitor.logComplete(activityId, response.status);
 				const hint = isPDFContent ? "; retry without mode for Markdown, or with mode \"answer\" and a prompt" : "";
@@ -1360,6 +1338,12 @@ async function extractViaHttp(
 				activityMonitor.logComplete(activityId, response.status);
 				return { url, title: "", content: "", error: options.rejectDirectImages, mimeType, status: response.status };
 			}
+			if (discoveryOnly) {
+				await response.body?.cancel();
+				activityMonitor.logComplete(activityId, response.status);
+				return { url, title: "", content: "", error: null, attempts: [] };
+			}
+			state.invoked = true;
 			try {
 				const buffer = await readResponseBufferWithLimit(response, maxResponseSize, () => responseSizeLimitError(maxResponseSize));
 				const { resizeImage } = await import("@earendil-works/pi-coding-agent");
@@ -1388,31 +1372,46 @@ async function extractViaHttp(
 				const buffer = await readPDFResponseBuffer(response, pdfConfig.maxSizeMB);
 				if (signal?.aborted) return abortedResult(url);
 				const result = await extractPDFToMarkdown(buffer, url, { signal, lookup: options?.lookup });
+				state.attempts = result.attempts.map(attempt => ({ provider: null, ...attempt }));
 				activityMonitor.logComplete(activityId, response.status);
 				return {
 					url,
 					title: result.title,
+					provider: null,
+					extractionProvider: result.extractionProvider,
+					attempts: state.attempts,
 					content: options?.mode === "answer"
 						? result.content
 						: `PDF extracted and saved to: ${result.outputPath}\n\n${result.pages > 0 ? `Pages: ${result.pages}\n` : ""}Characters: ${result.chars}`,
 					error: null,
 				};
 			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
+				const attempts = getPDFExtractionAttempts(err).map(attempt => ({ provider: null, ...attempt }));
+				state.attempts = attempts;
+				let message: string;
+				if (signal?.aborted || isAbortError(err)) message = "Aborted";
+				else if (err instanceof PDFProcessingLimitError || isFatalExtractionError(err)) message = errorMessage(err);
+				else {
+					// URL-only web adapters cannot bind their re-download to these bytes
+					// or enforce pdf.maxSizeMB, even where a PDF page cap is supported.
+					const engine = attempts.at(-1)?.extractionProvider;
+					const label = engine === "paddleocr" ? "PaddleOCR" : engine;
+					const status = errorMessage(err).match(/\bHTTP (\d{3})\b/)?.[1];
+					const diagnostic = label ? `: ${label}${status ? ` HTTP ${status}` : ""} extraction failed` : "";
+					message = `PDF extraction failed${diagnostic}. Web-provider fallback cannot preserve the validated PDF bytes and pdf.maxSizeMB size limit`;
+				}
 				activityMonitor.logError(activityId, message);
-				if (message.startsWith("PDF exceeds configured pdf.maxSizeMB limit")) {
-					return { url, title: "", content: "", error: message };
-				}
-				if (err instanceof CredentialResolutionError || isConfigParseError(err)) {
-					return { url, title: "", content: "", error: message };
-				}
-				if (pdfConfig.provider === "paddleocr") {
-					return { url, title: "", content: "", error: `PDF provider paddleocr failed: ${message}` };
-				}
-				return { url, title: "", content: "", error: `PDF extraction failed: ${message}` };
+				return { url, title: "", content: "", error: message, attempts, terminal: true };
 			}
 		}
 
+		if (discoveryOnly) {
+			await response.body?.cancel();
+			activityMonitor.logComplete(activityId, response.status);
+			return { url, title: "", content: "", error: null, attempts: [] };
+		}
+
+		state.invoked = true;
 		if (contentType.includes("application/octet-stream") ||
 			contentType.includes("image/") ||
 			contentType.includes("audio/") ||
@@ -1566,6 +1565,9 @@ async function extractViaHttp(
 			activityMonitor.logComplete(activityId, 0);
 		} else {
 			activityMonitor.logError(activityId, message);
+		}
+		if (isPDF(url) && options?.mode !== "raw" && !isFatalExtractionError(err)) {
+			return { url, title: "", content: "", error: "PDF download failed. Web-provider fallback cannot preserve the validated PDF bytes and size limit", terminal: true, attempts: [] };
 		}
 		return { url, title: "", content: "", error: message };
 	} finally {
