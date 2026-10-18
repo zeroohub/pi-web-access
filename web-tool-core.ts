@@ -315,7 +315,9 @@ function searchStructuredContent(responseId: string, fetchId: string | null, res
 function fetchStructuredContent(responseId: string | null, results: ExtractedContent[]): FetchContentStructuredContent {
 	return {
 		responseId,
-		urls: results.map(({ url, title, content, error, mimeType, status, duration }) => ({ url, title, content, error, mimeType, status, duration })),
+		urls: results.map(({ url, title, content, error, mimeType, status, duration, provider, extractionProvider, attempts }) => ({
+			url, title, content, error, mimeType, status, duration, provider, extractionProvider, attempts,
+		})),
 	};
 }
 
