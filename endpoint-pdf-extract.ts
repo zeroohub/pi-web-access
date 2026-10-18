@@ -14,6 +14,7 @@ export interface EndpointPDFExtractOptions {
 	signal?: AbortSignal;
 	timeoutMs?: number;
 	lookup?: Lookup;
+	onInvocation?: () => void;
 }
 
 export interface EndpointPDFExtractResult {
@@ -154,9 +155,10 @@ export async function extractPDFViaEndpoint(
 	// The parser URL is user-configured, like firecrawlBaseUrl, so loopback is allowed;
 	// LAN ranges still need ssrf.allowRanges, and every redirect hop is re-validated.
 	const guard = {
+		onRequest: options.onInvocation,
 		allowRanges: ssrf.allowRanges,
 		trustEnvProxy: ssrf.trustEnvProxy,
-		allowLoopback: isLoopbackHostname(new URL(endpointUrl).hostname),
+		allowLoopback: isLoopbackHostname(URL.parse(endpointUrl)?.hostname ?? ""),
 		...(options.lookup ? { lookup: options.lookup } : {}),
 	};
 

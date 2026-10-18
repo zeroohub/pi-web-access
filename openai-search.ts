@@ -345,11 +345,11 @@ async function resolvePiAuth(ctx: ExtensionContext, responsesUrl: string, provid
 	return undefined;
 }
 
-export async function resolveOpenAIAuth(ctx?: ExtensionContext, signal?: AbortSignal, model?: string): Promise<OpenAIAuth | undefined> {
+export async function resolveOpenAIAuth(ctx?: ExtensionContext, signal?: AbortSignal, requestedModel?: string): Promise<OpenAIAuth | undefined> {
 	const config = loadConfig();
 	const responsesUrl = resolveConfiguredResponsesUrl(config.openaiResponsesUrl);
 	const useProviderBaseUrl = resolveUseProviderBaseUrl(config);
-	const modelOverride = model ?? resolveConfiguredSearchModel(config.openaiSearchModel);
+	const modelOverride = requestedModel ?? resolveConfiguredSearchModel(config.openaiSearchModel);
 	const providers = resolveConfiguredSearchProviders(config.openaiSearchProviders);
 	if (ctx) {
 		const auth = await resolvePiAuth(ctx, responsesUrl, providers, modelOverride, config.openaiResponsesUrl !== undefined, useProviderBaseUrl);

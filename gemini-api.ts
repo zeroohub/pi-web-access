@@ -154,12 +154,19 @@ export function redactGeminiApiResponse(response: Response, text: string, apiKey
 	return redactGeminiCredentials(text, credentials?.apiKey ?? apiKey, credentials?.cloudflareApiKey, credentials?.adcToken ?? adcToken);
 }
 
+function parseGeminiApiUrl(url: string | URL): URL {
+	const parsed = URL.parse(url.toString());
+	if (!parsed) throw new Error("Failed to parse Gemini API URL");
+	return parsed;
+}
+
 export async function fetchGeminiApi(
 	url: string | URL,
 	init: RequestInit = {},
 	apiKey?: string | null,
+	onInvocation?: () => void,
 ): Promise<Response> {
-	const parsedUrl = new URL(url);
+	const parsedUrl = parseGeminiApiUrl(url);
 	for (const name of parsedUrl.searchParams.keys()) {
 		if (["key", "api_key"].includes(name.toLowerCase())) {
 			throw new Error("Gemini API credential query parameters are not allowed");
@@ -175,8 +182,8 @@ export async function fetchGeminiApi(
 	const resolvedApiKey = adcMode ? null : (apiKey === undefined ? await getApiKey(init.signal ?? undefined) : apiKey);
 	const cloudflareApiKey = isCloudflareGateway() ? await resolveCloudflareApiKey(init.signal ?? undefined) : null;
 	const allowedOrigins = new Set([
-		new URL(getApiHost()).origin,
-		new URL(DEFAULT_API_HOST).origin,
+		parseGeminiApiUrl(getApiHost()).origin,
+		parseGeminiApiUrl(DEFAULT_API_HOST).origin,
 		...(adcMode ? [parsedUrl.origin] : []),
 	]);
 	const needsAuth = resolvedApiKey || isGatewayConfigured() || adcMode;
@@ -195,6 +202,8 @@ export async function fetchGeminiApi(
 		}
 	}
 	try {
+		init.signal?.throwIfAborted();
+		onInvocation?.();
 		const response = await fetch(parsedUrl, { ...init, headers });
 		responseCredentials.set(response, { apiKey: resolvedApiKey, cloudflareApiKey, adcToken });
 		return response;
@@ -304,6 +313,7 @@ export async function queryGeminiApiWithVideo(
 	prompt: string,
 	videoUri: string,
 	options: GeminiApiOptions = {},
+	onInvocation?: () => void,
 ): Promise<string> {
 	const signal = withTimeout(options.signal, options.timeoutMs ?? 120000);
 	const apiKey = options.apiKey ?? await getApiKey(signal);
@@ -338,7 +348,7 @@ export async function queryGeminiApiWithVideo(
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify(body),
 		signal,
-	}, apiKey);
+	}, apiKey, onInvocation);
 
 	if (!res.ok) {
 		const errorText = redactGeminiApiResponse(res, await res.text(), apiKey);
