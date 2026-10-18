@@ -4,6 +4,30 @@ Web search and content extraction for documents and web resources.
 
 ## Language
 
+**Web-page provider**:
+An extraction service or engine that retrieves readable content from a web page, distinct from specialized PDF, repository, or video extraction.
+_Avoid_: Search provider when referring to web-page extraction
+
+**Explicit provider selection**:
+A request to use only the named provider when ordinary web-page extraction applies, without substitution by another web-page provider. Specialized extraction is a separate resource-specific route.
+_Avoid_: Preferred provider when no fallback is permitted
+
+**Specialized extractor**:
+A service or engine that interprets a particular resource type, such as a PDF, repository, or video, rather than extracting an ordinary web page.
+_Avoid_: Web-page provider when referring to specialized extraction
+
+**Specialized dispatch**:
+Resource-specific selection of an applicable, enabled specialized extractor before ordinary web-page routing. Selecting a web-page provider does not itself disable specialized dispatch.
+_Avoid_: Provider fallback when referring to initial resource-specific selection
+
+**Provider attempt**:
+An actual invocation of an extraction route, distinct from a configured route that was skipped or blocked before invocation.
+_Avoid_: Attempt when referring only to a configured or selected provider
+
+**Extraction provenance**:
+The web-page provider, any specialized extractor, and the ordered attempts responsible for an extraction result. It describes source extraction rather than subsequent answer generation.
+_Avoid_: Selected provider when referring to the route that actually produced content
+
 **PDF provider**:
 An extraction service or engine that converts a PDF document into readable document content.
 _Avoid_: Search provider when referring to PDF extraction
