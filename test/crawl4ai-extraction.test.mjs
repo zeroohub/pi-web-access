@@ -110,7 +110,14 @@ test("fetch_content falls back to configured Crawl4AI before hosted providers", 
 	assert.equal(child.status, 0, child.stderr);
 	const output = JSON.parse(child.stdout.trim());
 	assert.deepEqual(output.calls, ["https://example.com/client-rendered", "https://crawl.example.com/md"]);
-	assert.deepEqual(output.result, { url: "https://example.com/client-rendered", title: "Rendered", content: "# Rendered\nRendered body", error: null });
+	assert.deepEqual(output.result, {
+		url: "https://example.com/client-rendered", title: "Rendered", content: "# Rendered\nRendered body", error: null,
+		provider: "crawl4ai",
+		attempts: [
+			{ provider: "http", outcome: "failed", error: "HTTP extraction failed" },
+			{ provider: "crawl4ai", outcome: "succeeded" },
+		],
+	});
 });
 
 test("fetch_content tries Firecrawl before Crawl4AI when both are configured", async () => {

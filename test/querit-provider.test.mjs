@@ -470,6 +470,12 @@ test("fetch_content uses Querit after local and earlier hosted extraction fail",
 		title: "Rendered",
 		content: "# Querit rendered content",
 		error: null,
+		provider: "querit",
+		attempts: [
+			{ provider: "http", outcome: "failed", error: "HTTP extraction failed" },
+			{ provider: "jina", outcome: "failed", error: "jina extraction failed" },
+			{ provider: "querit", outcome: "succeeded" },
+		],
 	});
 });
 

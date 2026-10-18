@@ -365,6 +365,12 @@ test("fetch_content uses Search1API after local and Jina extraction fail", async
 		title: "Rendered",
 		content: "# Search1API rendered content",
 		error: null,
+		provider: "search1api",
+		attempts: [
+			{ provider: "http", outcome: "failed", error: "HTTP extraction failed" },
+			{ provider: "jina", outcome: "failed", error: "jina extraction failed" },
+			{ provider: "search1api", outcome: "succeeded" },
+		],
 	});
 });
 

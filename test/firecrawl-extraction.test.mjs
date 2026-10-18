@@ -388,7 +388,14 @@ test("fetch_content prefers configured Firecrawl before hosted fallbacks", async
 	assert.equal(child.status, 0, child.stderr);
 	const output = JSON.parse(child.stdout.trim());
 	assert.deepEqual(output.calls, ["https://example.com/client-rendered", "https://crawl.example.com/v2/scrape"]);
-	assert.deepEqual(output.result, { url: "https://example.com/client-rendered", title: "Rendered", content: "Rendered body", error: null });
+	assert.deepEqual(output.result, {
+		url: "https://example.com/client-rendered", title: "Rendered", content: "Rendered body", error: null,
+		provider: "firecrawl",
+		attempts: [
+			{ provider: "http", outcome: "failed", error: "HTTP extraction failed" },
+			{ provider: "firecrawl", outcome: "succeeded" },
+		],
+	});
 });
 
 test("Firecrawl extraction errors remain visible in fetch_content guidance", async () => {
