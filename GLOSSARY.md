@@ -28,6 +28,10 @@ _Avoid_: Attempt when referring only to a configured or selected provider
 The web-page provider, any specialized extractor, and the ordered attempts responsible for an extraction result. It describes source extraction rather than subsequent answer generation.
 _Avoid_: Selected provider when referring to the route that actually produced content
 
+**Local PDF source**:
+A PDF document available as a file on the machine running Web Access, rather than retrieved from a web address. Its location does not determine which PDF provider processes it.
+_Avoid_: Local extraction when referring only to the source location
+
 **PDF provider**:
 An extraction service or engine that converts a PDF document into readable document content.
 _Avoid_: Search provider when referring to PDF extraction

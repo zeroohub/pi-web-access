@@ -2035,12 +2035,12 @@ export default function (pi: ExtensionAPI) {
 	if (fetchContentEnabled) pi.registerTool({
 		name: toolNames.fetchContent,
 		label: "Fetch Content",
-		description: `Fetch web pages, PDFs, GitHub repos, images, YouTube and local video, as the mode allows. ${fetchContentStorageNote}`,
+		description: `Fetch web pages, remote/local PDFs, GitHub repos, images, YouTube and local video, as the mode allows. ${fetchContentStorageNote}`,
 		promptSnippet:
-			`Use to fetch URL content, direct images, GitHub repos, and videos.${fetchModeConfig.allowedModes.includes("extract") ? ' For specific values (a price, version, date or limit), use mode "extract" with fields instead of reading the whole page.' : ""}`,
+			`Use to fetch URL content, direct images, GitHub repos, local PDFs, and videos.${fetchModeConfig.allowedModes.includes("extract") ? ' For specific values (a price, version, date or limit), use mode "extract" with fields instead of reading the whole page.' : ""}`,
 		parameters: Type.Object({
-			url: Type.Optional(Type.String()),
-			urls: Type.Optional(Type.Array(Type.String())),
+			url: Type.Optional(Type.String({ description: "Single URL or local PDF/video path to fetch" })),
+			urls: Type.Optional(Type.Array(Type.String(), { description: "Multiple URLs or local PDF/video paths (parallel)" })),
 			provider: Type.Optional(StringEnum<FetchProviderSelection[]>(["auto", ...FETCH_PROVIDERS], { description: FETCH_PROVIDER_DESCRIPTION })),
 			forceClone: Type.Optional(Type.Boolean({ description: "Clone GitHub repos over the size limit" })),
 			prompt: Type.Optional(Type.String({

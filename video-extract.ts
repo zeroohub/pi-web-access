@@ -1,7 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { resolve, extname, basename, join, dirname } from "node:path";
+import { extname, basename } from "node:path";
+import { parseLocalFilePath, resolveLocalFilePath } from "./local-file.ts";
 import { activityMonitor } from "./activity.ts";
 import { canAttachImages } from "./feature-config.ts";
 import { isGeminiWebAvailable, queryWithCookies } from "./gemini-web.ts";
@@ -103,23 +104,14 @@ export function isVideoFile(input: string): VideoFileInfo | null {
 	const config = loadVideoConfig();
 	if (!config.enabled) return null;
 
-	const isFilePath = input.startsWith("/") || input.startsWith("./") || input.startsWith("../") || input.startsWith("file://");
-	if (!isFilePath) return null;
-
-	let filePath = input;
-	if (input.startsWith("file://")) {
-		try {
-			filePath = decodeURIComponent(new URL(input).pathname);
-		} catch {
-			return null;
-		}
-	}
+	const filePath = parseLocalFilePath(input);
+	if (!filePath) return null;
 
 	const ext = extname(filePath).toLowerCase();
 	const mimeType = VIDEO_EXTENSIONS[ext];
 	if (!mimeType) return null;
 
-	const absolutePath = resolveFilePath(filePath);
+	const absolutePath = resolveLocalFilePath(filePath);
 	if (!absolutePath) return null;
 
 	let stat: ReturnType<typeof statSync>;
@@ -138,27 +130,6 @@ export function isVideoFile(input: string): VideoFileInfo | null {
 		maxSizeBytes: maxBytes,
 		withinUploadLimit: stat.size <= maxBytes,
 	};
-}
-
-function resolveFilePath(filePath: string): string | null {
-	const absolutePath = resolve(filePath);
-	if (existsSync(absolutePath)) return absolutePath;
-
-	const dir = dirname(absolutePath);
-	const base = basename(absolutePath);
-	if (!existsSync(dir)) return null;
-
-	try {
-		const normalizedBase = normalizeSpaces(base);
-		const match = readdirSync(dir).find(f => normalizeSpaces(f) === normalizedBase);
-		return match ? join(dir, match) : null;
-	} catch {
-		return null;
-	}
-}
-
-function normalizeSpaces(s: string): string {
-	return s.replace(/[\u00A0\u2000-\u200B\u202F\u205F\u3000\uFEFF]/g, " ");
 }
 
 export async function extractVideo(

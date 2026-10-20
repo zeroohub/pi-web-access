@@ -66,10 +66,10 @@ export const MCP_TOOL_DEFINITIONS: readonly McpToolDefinition[] = [
 	},
 	{
 		name: "fetch_content",
-		description: "Fetch web pages, PDFs, and GitHub repos. Full content is stored for retrieval with get_search_content by responseId.",
+		description: "Fetch web pages, remote/server-side local PDFs, and GitHub repos. Local paths use /, ./, ../, or file://; configured PDF engines may upload bytes. Retrieve stored content by responseId with get_search_content.",
 		inputSchema: Type.Object({
-			url: Type.Optional(Type.String()),
-			urls: Type.Optional(Type.Array(Type.String())),
+			url: Type.Optional(Type.String({ description: "URL or server-side local PDF path" })),
+			urls: Type.Optional(Type.Array(Type.String({ description: "URL or server-side local PDF path" }))),
 			provider: Type.Optional(stringEnum(["auto", ...FETCH_PROVIDERS], FETCH_PROVIDER_DESCRIPTION)),
 			mode: Type.Optional(stringEnum(["readable", "raw"], "readable (default): extract readable content as markdown; raw: return the exact textual body using direct HTTP only")),
 			forceClone: Type.Optional(Type.Boolean({ description: "Clone GitHub repos over the size limit" })),

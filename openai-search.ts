@@ -78,7 +78,8 @@ function isAzureResponsesUrl(url: URL): boolean {
 }
 
 function resolveCurrentModelSearchTarget(model: CurrentModel): CurrentModelSearchTarget {
-	const url = new URL(model.baseUrl);
+	const url = URL.parse(model.baseUrl);
+	if (!url) throw new Error("Current model base URL must be an absolute URL");
 	if (url.protocol !== "https:") throw new Error("Current model base URL must use HTTPS");
 
 	if (model.provider === "openai" && model.api === "openai-responses" && url.hostname.toLowerCase() === "api.openai.com") {
@@ -283,7 +284,8 @@ function applyOpenCodeDestinationHeaders(headers: HeadersInit, requestUrl: strin
 	const requestHeaders = new Headers(headers);
 	requestHeaders.delete("x-opencode-session");
 	requestHeaders.delete("x-opencode-client");
-	const url = new URL(requestUrl);
+	const url = URL.parse(requestUrl);
+	if (!url) throw new Error("OpenAI request URL must be an absolute URL");
 	const sessionId = ctx?.sessionManager?.getSessionId?.();
 	if (url.protocol === "https:" && url.hostname === "opencode.ai" && sessionId) {
 		requestHeaders.set("x-opencode-session", sessionId);
@@ -770,7 +772,9 @@ async function runOpenAISearch(
 	const useAlphaSearch = isAlphaSearchEnabled();
 	const useCodexEndpoint = auth.useCodexEndpoint ?? (auth.provider === "openai-codex" || isCodexJwt(auth.apiKey));
 	const responsesUrl = useCodexEndpoint && !auth.useProviderBaseUrl ? CODEX_RESPONSES_URL : auth.responsesUrl;
-	const isAzure = isAzureResponsesUrl(new URL(responsesUrl));
+	const target = URL.parse(responsesUrl);
+	if (!target) throw new Error("OpenAI Responses endpoint must be an absolute URL");
+	const isAzure = isAzureResponsesUrl(target);
 	if (isAzure && useAlphaSearch) {
 		throw new OpenAIAlphaSearchUnsupportedError("Azure OpenAI does not support Codex alpha/search; disable openaiUseAlphaSearch to use hosted web_search");
 	}
