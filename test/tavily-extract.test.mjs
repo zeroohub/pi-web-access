@@ -124,13 +124,14 @@ test("Tavily explicit credential resolution fails closed", async () => {
 	assert.equal(output.calls.length, 1);
 });
 
-test("Tavily fetch requires remote hosted opt-in after guarded resource discovery", async () => {
+test("Tavily hosted opt-out preserves the failed automatic HTTP extraction without calling Tavily", async () => {
 	const output = await run({optIn: false, providers: ["tavily"]});
 	assert.deepEqual(output.calls.map(call => call.url), ["https://example.com/page"]);
-	assert.match(output.result.error, /Remote hosted fetch providers are disabled/);
+	assert.match(output.result.error, /^HTTP 403/);
+	assert.match(output.result.error, /fetchRouting.allowRemoteHostedProviders/);
 	assert.equal(output.result.provider, null);
 	assert.equal(output.result.content, "");
-	assert.deepEqual(output.result.attempts, []);
+	assert.deepEqual(output.result.attempts, [{provider: "http", outcome: "failed", error: "HTTP extraction failed"}]);
 });
 
 for (const scenario of [{private: true}, {deny: true}, {abort: true}]) {

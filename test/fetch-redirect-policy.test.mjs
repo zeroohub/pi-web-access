@@ -93,16 +93,16 @@ test("a recoverable HTTP failure under the policy tries no hosted or Jina provid
 	assert.deepEqual(fetched, ["https://a.example/down"]);
 });
 
-test("a routing order without http is refused after guarded ordinary-type discovery", async () => {
+test("a routing order without http still permits same-origin automatic HTTP extraction", async () => {
 	const { fetched, result } = await run({
 		config: { ...HOSTED, fetchRouting: { providers: ["jina", "tinyfish"], allowRemoteHostedProviders: true } },
 		url: "https://a.example/page",
 		options: { redirects: "same-origin" },
 	});
-	assert.equal(result.error, REFUSED_PATH("jina"));
-	assert.equal(result.content, "");
-	assert.equal(result.provider, null);
-	assert.deepEqual(result.attempts, []);
+	assert.equal(result.error, null);
+	assert.equal(result.content, "page body from https://a.example/page");
+	assert.equal(result.provider, "http");
+	assert.deepEqual(result.attempts, [{ provider: "http", outcome: "succeeded" }]);
 	assert.deepEqual(fetched, ["https://a.example/page"]);
 });
 

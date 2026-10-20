@@ -495,17 +495,16 @@ test("extractContent discovers extensionless PDFs before automatic ordinary-rout
 	}
 });
 
-test("extractContent automatic restrictions still refuse ordinary pages after discovery without extraction", () => {
+test("extractContent automatic restrictions exclude fallbacks without skipping ordinary HTTP extraction", () => {
 	for (const redirects of [undefined, "same-origin"]) {
-		const {result, calls, cancelledBody} = run({
-			unusedBody: true, options: {provider: "auto", redirects},
+		const {result, calls} = run({
+			thin: true, options: {provider: "auto", redirects},
 			config: {fetchRouting: {providers: ["jina"], allowRemoteHostedProviders: Boolean(redirects)}},
 		});
-		assert.match(result.error, redirects ? /same-origin redirect policy/ : /Remote hosted fetch providers are disabled/);
-		assert.equal(result.content, "");
+		assert.match(result.error, /JavaScript-rendered/);
+		assert.equal(result.content, "Loading...");
 		assert.equal(result.provider, null);
-		assert.deepEqual(result.attempts, []);
-		assert.equal(cancelledBody, true);
+		assert.deepEqual(result.attempts, [{provider: "http", outcome: "failed", error: "HTTP extraction failed"}]);
 		assert.deepEqual(calls.map(call => call.url), ["https://example.com/page"]);
 	}
 });
