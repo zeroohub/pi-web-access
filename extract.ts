@@ -918,9 +918,6 @@ async function dispatchContent(
 	} catch (err) {
 		return { url, title: "", content: "", error: errorMessage(err) };
 	}
-	const automaticPolicyRefusal = (!options?.provider || options.provider === "auto") &&
-		redirectPolicy === "same-origin" && !fetchRouting.providers.includes("http")
-		? redirectPolicyRouteRefusal(url, fetchRouting.providers[0]!) : null;
 	const explicitProvider = options?.provider && options.provider !== "auto" ? options.provider : undefined;
 	const configuredOrder = explicitProvider ? [explicitProvider] : fetchRouting.providers;
 	const providerOrder: FetchProvider[] = explicitProvider ? [explicitProvider] : redirectPolicy === "same-origin"
@@ -928,12 +925,6 @@ async function dispatchContent(
 		: remoteUrl && !fetchRouting.allowRemoteHostedProviders
 			? configuredOrder.filter(provider => !REMOTE_HOSTED_FETCH_PROVIDERS.has(provider))
 			: configuredOrder;
-	const ordinaryRouteRefusal = automaticPolicyRefusal ?? (providerOrder.length === 0 ? {
-		url,
-		title: "",
-		content: "",
-		error: "Remote hosted fetch providers are disabled unless fetchRouting.allowRemoteHostedProviders is true",
-	} : null);
 
 	let httpResult: ExtractedContent | null = null;
 	let declaredLinks: DeclaredWebLink[] = [];
@@ -947,14 +938,12 @@ async function dispatchContent(
 		? { ...httpResult, error: message }
 		: { url, title: "", content: "", error: message };
 	const runHttpProvider = async (): Promise<ExtractedContent | null> => {
-		const { declaredLinks: discoveredLinks = [], terminal, ...result } = await extractViaHttp(
-			url, fetchTimeoutMs, signal, options, undefined, ordinaryRouteRefusal ? true : undefined,
-		);
+		const { declaredLinks: discoveredLinks = [], terminal, ...result } = await extractViaHttp(url, fetchTimeoutMs, signal, options);
 		httpResult = result;
 		attempts.push(...(httpResult.attempts ?? []));
 		declaredLinks = discoveredLinks;
 		if (signal?.aborted) return abortedResult(url);
-		if (!httpResult.error && (httpResult.extractionProvider || (!ordinaryRouteRefusal && (!explicitProvider || explicitProvider === "http")))) return httpResult;
+		if (!httpResult.error && (httpResult.extractionProvider || !explicitProvider || explicitProvider === "http")) return httpResult;
 		if (terminal || isNonRecoverableHttpError(httpResult.error) || httpResult.error === options?.rejectDirectImages) {
 			return httpResult;
 		}
@@ -970,8 +959,7 @@ async function dispatchContent(
 		if (explicitProvider === "http") return specializedFailure ?? httpResult!;
 	}
 
-	// Ordinary-route refusals cannot prevent guarded PDF discovery/specialization.
-	if (ordinaryRouteRefusal) return ordinaryRouteRefusal;
+	// Ordinary-provider permissions do not gate successful HTTP or specialized extraction.
 	if (explicitProvider && explicitProvider !== "http") {
 		if (redirectPolicy === "same-origin") return redirectPolicyRouteRefusal(url, explicitProvider);
 		if (remoteUrl && !fetchRouting.allowRemoteHostedProviders && REMOTE_HOSTED_FETCH_PROVIDERS.has(explicitProvider)) {

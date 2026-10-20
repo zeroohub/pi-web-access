@@ -38,13 +38,16 @@ function run(scenario = {}) {
 				calls.push({ url, body: typeof init.body === 'string' ? JSON.parse(init.body) : null });
 				if (url === 'https://api.tavily.com/extract') {
 					const source = JSON.parse(init.body).urls[0];
-					if (source.endsWith('/failed')) return Response.json({ error: 'Synthetic quota exhausted' }, { status: 429 });
+					if (s.hostedFailure || source.endsWith('/failed')) return Response.json({ error: 'Synthetic quota exhausted' }, { status: 429 });
 					return Response.json({ results: [{ url: source, title: 'Hosted page', raw_content: '# Hosted page\\n\\nSource from Tavily.' }] });
 				}
+				if (url.startsWith('https://r.jina.ai/')) return new Response('Synthetic Jina failure', { status: 503 });
 				if (url.includes('generativelanguage.googleapis.com')) return Response.json({ candidates: [{ finishReason: 'STOP', content: { parts: [{ text: '# Video\\n\\nSynthetic transcript.' }] } }] });
 				if (url.startsWith('https://93.184.216.34/')) {
 					if (url.endsWith('/document')) return new Response(makePdf('PDF source content'), { headers: { 'content-type': 'application/pdf' } });
-					if (url.endsWith('/thin')) return new Response('<html><body><div>Loading...</div><script></script><script></script><script></script><script></script></body></html>', { headers: { 'content-type': 'text/html' } });
+					if (url.endsWith('/cross-origin')) return new Response(null, { status: 302, headers: { location: 'https://other.example/page' } });
+					if (url.endsWith('/article')) return new Response('<html><head><title>Readable article</title></head><body><article><p>' + 'Readable article content. '.repeat(100) + '</p></article></body></html>', { headers: { 'content-type': 'text/html' } });
+					if (url.endsWith('/thin') || url.endsWith('/declared')) return new Response('<html><body><div>Loading...</div><script></script><script></script><script></script><script></script></body></html>', { headers: { 'content-type': 'text/html', ...(url.endsWith('/declared') ? { link: '</docs>; rel=service-doc' } : {}) } });
 					return new Response('Ordinary HTTP source. '.repeat(60), { headers: { 'content-type': 'text/plain' } });
 				}
 				throw new Error('Unexpected external HTTP request');
@@ -194,6 +197,120 @@ test("shared auto and explicit http reuse their one HTTP response and report act
 	}
 });
 
+test("shared auto extracts origin content when hosted fallbacks are disabled", () => {
+	for (const provider of [undefined, "auto"]) {
+		const { result, calls } = run({
+			params: { url: PAGE, ...(provider ? { provider } : {}) },
+			config: { fetchRouting: { providers: ["tavily"], allowRemoteHostedProviders: false } },
+		});
+		const source = result.structuredContent.urls[0];
+		assert.equal(source.error, null);
+		assert.equal(source.provider, "http");
+		assert.match(source.content, /^Ordinary HTTP source/);
+		assert.deepEqual(source.attempts, [{ provider: "http", outcome: "succeeded" }]);
+		assert.deepEqual(calls.map(c => c.url), [PAGE]);
+	}
+});
+
+test("shared auto retains the HTTP extraction failure when no fallback is permitted", () => {
+	const url = "https://93.184.216.34/thin";
+	for (const redirects of [undefined, "same-origin"]) {
+		for (const provider of [undefined, "auto"]) {
+			const { result, calls } = run({
+				params: { url, redirects, ...(provider ? { provider } : {}) },
+				config: { fetchRouting: { providers: ["tavily"], allowRemoteHostedProviders: Boolean(redirects) } },
+			});
+			const source = result.structuredContent.urls[0];
+			assert.equal(result.isError, true);
+			assert.match(source.error, /JavaScript-rendered/);
+			assert.equal(source.provider, null);
+			assert.deepEqual(source.attempts, [{ provider: "http", outcome: "failed", error: "HTTP extraction failed" }]);
+			assert.deepEqual(calls.map(c => c.url), [url]);
+		}
+	}
+});
+
+test("shared auto extracts HTML under same-origin without a configured HTTP entry", () => {
+	const url = "https://93.184.216.34/article";
+	for (const provider of [undefined, "auto"]) {
+		const { result, calls } = run({
+			params: { url, redirects: "same-origin", ...(provider ? { provider } : {}) },
+			config: { fetchRouting: { providers: ["tavily"], allowRemoteHostedProviders: true } },
+		});
+		const source = result.structuredContent.urls[0];
+		assert.equal(source.error, null);
+		assert.equal(source.title, "Readable article");
+		assert.match(source.content, /Readable article content/);
+		assert.equal(source.provider, "http");
+		assert.deepEqual(source.attempts, [{ provider: "http", outcome: "succeeded" }]);
+		assert.deepEqual(calls.map(c => c.url), [url]);
+	}
+});
+
+test("shared HTTP success does not resolve unused fallback credentials", () => {
+	for (const providers of [["http", "tavily"], ["tavily", "http"], ["tavily"]]) {
+		const { result, calls } = run({
+			params: { url: PAGE, provider: "auto" },
+			config: { tavilyApiKey: "$MISSING_UNUSED_TAVILY_KEY", fetchRouting: { providers, allowRemoteHostedProviders: true } },
+		});
+		assert.equal(result.structuredContent.urls[0].error, null);
+		assert.equal(result.structuredContent.urls[0].provider, "http");
+		assert.deepEqual(result.structuredContent.urls[0].attempts, [{ provider: "http", outcome: "succeeded" }]);
+		assert.deepEqual(calls.map(c => c.url), [PAGE]);
+	}
+});
+
+test("shared auto retains declared-link acceptance without an eligible hosted fallback", () => {
+	const url = "https://93.184.216.34/declared";
+	for (const redirects of [undefined, "same-origin"]) {
+		const { result, calls } = run({
+			params: { url, provider: "auto", redirects },
+			config: { fetchRouting: { providers: ["tavily"], allowRemoteHostedProviders: Boolean(redirects) } },
+		});
+		const source = result.structuredContent.urls[0];
+		assert.equal(source.error, null);
+		assert.equal(source.provider, "http");
+		assert.match(source.content, /https:\/\/93\.184\.216\.34\/docs/);
+		assert.deepEqual(source.attempts, [{ provider: "http", outcome: "succeeded" }]);
+		assert.deepEqual(calls.map(c => c.url), [url]);
+	}
+});
+
+test("shared auto preserves per-URL HTTP, PDF, insufficient and blocked results with no eligible fallback", () => {
+	const urls = [PAGE, "https://93.184.216.34/document", "https://93.184.216.34/thin", "http://127.0.0.1/private"];
+	const { result, calls } = run({
+		params: { urls, provider: "auto" },
+		config: { fetchRouting: { providers: ["tavily"], allowRemoteHostedProviders: false } },
+	});
+	const [page, pdf, thin, blocked] = result.structuredContent.urls;
+	assert.equal(result.details.successful, 2);
+	assert.equal(page.provider, "http");
+	assert.equal(page.error, null);
+	assert.deepEqual(page.attempts, [{ provider: "http", outcome: "succeeded" }]);
+	assert.equal(pdf.provider, null);
+	assert.equal(pdf.extractionProvider, "unpdf");
+	assert.equal(pdf.error, null);
+	assert.deepEqual(pdf.attempts, [{ provider: null, extractionProvider: "unpdf", outcome: "succeeded" }]);
+	assert.match(thin.error, /JavaScript-rendered/);
+	assert.deepEqual(thin.attempts, [{ provider: "http", outcome: "failed", error: "HTTP extraction failed" }]);
+	assert.match(blocked.error, /Blocked internal address/);
+	assert.deepEqual(blocked.attempts, []);
+	assert.deepEqual(calls.map(c => c.url).sort(), [PAGE, "https://93.184.216.34/document", "https://93.184.216.34/thin"].sort());
+});
+
+test("shared same-origin auto refuses cross-origin redirects without an HTTP list entry", () => {
+	const url = "https://93.184.216.34/cross-origin";
+	const { result, calls } = run({
+		params: { url, provider: "auto", redirects: "same-origin" },
+		config: { fetchRouting: { providers: ["tavily"], allowRemoteHostedProviders: true } },
+	});
+	const source = result.structuredContent.urls[0];
+	assert.match(source.error, /Refused cross-origin redirect/);
+	assert.equal(source.provider, null);
+	assert.deepEqual(source.attempts, []);
+	assert.deepEqual(calls.map(c => c.url), [url]);
+});
+
 test("Pi specialized YouTube success defers unused selected-provider credentials and has response-only identity", () => {
 	const { result, calls, schema } = run({
 		host: "pi", params: { url: "https://youtube.com/watch?v=abcdefghijk", provider: "tavily" },
@@ -209,6 +326,39 @@ test("Pi specialized YouTube success defers unused selected-provider credentials
 	assert.equal(schema.input.properties.provider.enum.includes("youtube"), false);
 	assert.equal(schema.input.properties.provider.enum.includes("local-video"), false);
 	assert.doesNotMatch(JSON.stringify(result.content), /extractionProvider|"attempts"/);
+});
+
+test("Pi automatic answer mode preserves HTTP source provenance without eligible fallbacks", () => {
+	const { result, calls, answers, retrieved } = run({
+		host: "pi", params: { url: PAGE, provider: "auto", mode: "answer", prompt: "What does the page say?" },
+		config: { fetchRouting: { providers: ["tavily"], allowRemoteHostedProviders: false } },
+	});
+	const source = result.structuredContent.urls[0];
+	assert.equal(source.error, null);
+	assert.equal(source.provider, "http");
+	assert.equal(source.content, "Answer from the separately configured model.");
+	assert.deepEqual(source.attempts, [{ provider: "http", outcome: "succeeded" }]);
+	assert.equal(answers.length, 1);
+	assert.match(answers[0], /Ordinary HTTP source/);
+	assert.match(retrieved.content[0].text, /Ordinary HTTP source/);
+	assert.deepEqual(calls.map(c => c.url), [PAGE]);
+});
+
+test("shared auto rejects malformed routing configuration before fetching", () => {
+	for (const fetchRouting of [
+		{ providers: [] },
+		{ providers: "http" },
+		{ providers: ["unknown"] },
+		{ providers: ["http", "http"] },
+		{ providers: ["http"], allowRemoteHostedProviders: "false" },
+	]) {
+		const { result, calls } = run({ params: { url: PAGE, provider: "auto" }, config: { fetchRouting } });
+		assert.equal(result.isError, true);
+		assert.match(result.structuredContent.urls[0].error, /fetchRouting/);
+		assert.equal(result.structuredContent.urls[0].provider, null);
+		assert.deepEqual(result.structuredContent.urls[0].attempts, []);
+		assert.deepEqual(calls, []);
+	}
 });
 
 test("shared request validation rejects invalid selections without external requests", () => {
@@ -245,13 +395,37 @@ test("MCP rejects invalid and raw non-HTTP selections without changing its error
 
 test("shared automatic fallback serializes ordered actual attempts without repeating HTTP", () => {
 	const url = "https://93.184.216.34/thin";
-	const { result, calls } = run({
-		params: { url }, config: { fetchRouting: { providers: ["http", "tavily"], allowRemoteHostedProviders: true } },
-	});
-	assert.equal(result.structuredContent.urls[0].provider, "tavily");
-	assert.deepEqual(result.structuredContent.urls[0].attempts, [
-		{ provider: "http", outcome: "failed", error: "HTTP extraction failed" },
-		{ provider: "tavily", outcome: "succeeded" },
-	]);
-	assert.deepEqual(calls.map(c => c.url), [url, "https://api.tavily.com/extract"]);
+	for (const providers of [["http", "tavily"], ["tavily", "http"], ["tavily"]]) {
+		const { result, calls } = run({
+			params: { url }, config: { fetchRouting: { providers, allowRemoteHostedProviders: true } },
+		});
+		assert.equal(result.structuredContent.urls[0].provider, "tavily");
+		assert.deepEqual(result.structuredContent.urls[0].attempts, [
+			{ provider: "http", outcome: "failed", error: "HTTP extraction failed" },
+			{ provider: "tavily", outcome: "succeeded" },
+		]);
+		assert.deepEqual(calls.map(c => c.url), [url, "https://api.tavily.com/extract"]);
+	}
+});
+
+test("shared auto preserves fallback order and actual attempts on success or exhaustion", () => {
+	const url = "https://93.184.216.34/thin";
+	for (const hostedFailure of [false, true]) {
+		const { result, calls } = run({
+			hostedFailure, params: { url, provider: "auto" },
+			config: { fetchRouting: { providers: ["jina", "http", "tavily"], allowRemoteHostedProviders: true } },
+		});
+		const source = result.structuredContent.urls[0];
+		assert.equal(source.provider, hostedFailure ? null : "tavily");
+		assert.deepEqual(source.attempts, [
+			{ provider: "http", outcome: "failed", error: "HTTP extraction failed" },
+			{ provider: "jina", outcome: "failed", error: "jina extraction failed" },
+			hostedFailure
+				? { provider: "tavily", outcome: "failed", error: "tavily extraction failed" }
+				: { provider: "tavily", outcome: "succeeded" },
+		]);
+		if (hostedFailure) assert.match(source.error, /JavaScript-rendered/);
+		else assert.equal(source.error, null);
+		assert.deepEqual(calls.map(c => c.url), [url, "https://r.jina.ai/" + url, "https://api.tavily.com/extract"]);
+	}
 });
