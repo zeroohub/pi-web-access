@@ -86,7 +86,7 @@ test("Parallel MCP sends optional Bearer auth and redacts it from errors", async
 	assert.match(output.error, /\[redacted\]/);
 });
 
-test("Parallel MCP web_fetch is available only through explicit hosted fetch routing", async () => {
+test("Parallel MCP web_fetch requires hosted opt-in after automatic HTTP extraction", async () => {
 	const enabledHome = await createHome({ fetchRouting: { providers: ["parallel-mcp"], allowRemoteHostedProviders: true } });
 	const enabled = runChild(`
 		const calls = [];
@@ -96,7 +96,7 @@ test("Parallel MCP web_fetch is available only through explicit hosted fetch rou
 			return new Response("<html><body></body></html>", { status: 200, headers: { "content-type": "text/html" } });
 		};
 		const { extractContent } = await import(${JSON.stringify(extractModuleUrl)});
-		const result = await extractContent("https://example.com/article");
+		const result = await extractContent("https://example.com/article", undefined, { lookup: async () => [{ address: "93.184.216.34", family: 4 }] });
 		console.log(JSON.stringify({ calls, result }));
 	`, { PI_CODING_AGENT_DIR: enabledHome });
 	assert.equal(enabled.status, 0, enabled.stderr);
@@ -109,13 +109,16 @@ test("Parallel MCP web_fetch is available only through explicit hosted fetch rou
 		const calls = [];
 		globalThis.fetch = async (url) => { calls.push(String(url)); return new Response("<html><body></body></html>", { status: 200, headers: { "content-type": "text/html" } }); };
 		const { extractContent } = await import(${JSON.stringify(extractModuleUrl)});
-		const result = await extractContent("https://example.com/article");
-		console.log(JSON.stringify({ calls, error: result.error }));
+		const result = await extractContent("https://example.com/article", undefined, { lookup: async () => [{ address: "93.184.216.34", family: 4 }] });
+		console.log(JSON.stringify({ calls, result }));
 	`, { PI_CODING_AGENT_DIR: disabledHome });
 	assert.equal(disabled.status, 0, disabled.stderr);
 	const disabledOutput = JSON.parse(disabled.stdout.trim());
-	assert.equal(disabledOutput.calls.includes("https://search.parallel.ai/mcp"), false);
-	assert.match(disabledOutput.error, /Remote hosted fetch providers are disabled/);
+	assert.deepEqual(disabledOutput.calls, ["https://example.com/article"]);
+	assert.match(disabledOutput.result.error, /^Could not extract readable content/);
+	assert.match(disabledOutput.result.error, /fetchRouting.allowRemoteHostedProviders/);
+	assert.equal(disabledOutput.result.provider, null);
+	assert.deepEqual(disabledOutput.result.attempts, [{ provider: "http", outcome: "failed", error: "HTTP extraction failed" }]);
 });
 
 test("Parallel MCP stays outside provider all and the default fetch route", async () => {
