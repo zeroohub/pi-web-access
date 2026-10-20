@@ -197,7 +197,7 @@ Batch searches run up to three queries concurrently. Provider routing and fallba
 
 ### fetch_content
 
-Fetch URL(s) as readable markdown, exact textual HTTP bodies, direct images, or page-grounded answers. Automatically detects and handles GitHub repos, GitHub PRs and issues, YouTube videos, PDFs, local video files, images, and regular web pages.
+Fetch URL(s) as readable markdown, exact textual HTTP bodies, direct images, or page-grounded answers. Automatically detects and handles GitHub repos, GitHub PRs and issues, YouTube videos, remote and local PDFs, local video files, images, and regular web pages.
 
 ```typescript
 fetch_content({ url: "https://example.com/article" })
@@ -207,6 +207,7 @@ fetch_content({ url: "https://github.com/owner/repo" })
 fetch_content({ url: "https://github.com/owner/repo/pull/123#discussion_r456" })
 fetch_content({ url: "https://youtube.com/watch?v=abc", prompt: "What libraries are shown?" })
 fetch_content({ url: "/path/to/recording.mp4", prompt: "What error appears on screen?" })
+fetch_content({ url: "./reports/quarterly.pdf" })
 fetch_content({ url: "https://youtube.com/watch?v=abc", timestamp: "23:41-25:00", frames: 4 })
 fetch_content({ url: "https://example.com/api", mode: "raw" })
 fetch_content({ url: "https://example.com/guide", mode: "answer", prompt: "What are the installation steps?" })
@@ -216,7 +217,7 @@ fetch_content({ url: "https://example.com/diagram.png" })
 
 | Parameter | Description |
 | ----------- | ------------- |
-| `url` / `urls` | Single URL/path or multiple URLs |
+| `url` / `urls` | Single URL/local PDF or video path, or multiple URLs/paths |
 | `provider` | Optional scalar ordinary web-page provider for every URL: `auto`, `http`, `firecrawl`, `crawl4ai`, `jina`, `tinyfish`, `search1api`, `querit`, `kagi`, `ollama`, `parallel`, `parallel-mcp`, `brightdata`, `gemini`, or `tavily` |
 | `prompt` | Question for video analysis, or the page-local question required by `mode: "answer"` |
 | `mode` | `readable` (default), `raw` for exact textual HTTP bodies, or `answer` for a grounded answer from fetched content |
@@ -352,7 +353,15 @@ Requires `ffmpeg` (and `yt-dlp` for YouTube). Timestamps accept `H:MM:SS`, `MM:S
 
 With `mode: "answer"`, the answer model receives the extracted PDF Markdown rather than the saved-file notice. The Markdown file is still saved, and the original extracted content remains available through `get_search_content`; ordinary readable-mode PDF fetches continue to return the file path.
 
-PDF URLs are converted to Markdown and saved under the temporary `pi-web-pdf` directory by default so the agent can `read` specific sections without loading the full document into context. Five engines are available, selected with `pdf.provider` (`"auto"` is the default):
+PDF URLs and local PDF sources are converted to Markdown and saved under the temporary `pi-web-pdf` directory by default so the agent can `read` specific sections without loading the full document into context.
+
+Local PDF sources use the existing `url`/`urls` arguments and the same explicit path forms as local video: absolute paths, `./`, `../`, or `file://` URIs. The filename must end in `.pdf` (case-insensitive). Bare names such as `report.pdf`, `~/report.pdf`, extensionless files, and other local formats are not supported. Relative paths resolve against the tool process working directory. Over MCP, paths identify files on the server, not on the remote client's machine. Explicitly named readable regular files outside that directory and symlinks are permitted under normal filesystem permissions; this is not a workspace sandbox.
+
+Local PDF reading skips HTTP discovery/download and enforces `pdf.enabled`, bounded `pdf.maxSizeMB` input reads, and the existing PDF processing/page controls. Missing, unreadable, nonregular or oversized files fail before any engine invocation. Raw mode and HTTP cookie authentication do not support local PDFs. An ordinary web-page `provider` argument does not disable PDF specialization or require credentials for an unused web-page provider. PDF failures never fall through to ordinary web-page extraction.
+
+A local PDF source does not imply local extraction: the same configured PDF engines and fallback chain apply, and configured remote engines can receive the file bytes. Set `pdf.provider` to `"unpdf"` for on-machine PDF extraction; answer mode separately sends extracted Markdown to the selected answer model. No new upload-consent flag is introduced.
+
+Five engines are available, selected with `pdf.provider` (`"auto"` is the default):
 
 | Provider | Engine | Trade-offs |
 | --- | --- | --- |

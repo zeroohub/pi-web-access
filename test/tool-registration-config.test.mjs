@@ -77,8 +77,8 @@ test("default public execution tool definitions retain their compatibility hashe
 	const expected = {
 		web_search: "eb831762c218c50c43cedf765a984f6b1c46efb47ac9b7289dfbac4854112de4",
 		source_check: "48e69c75320f7a844a83bfe032c98b93ef11115e908831e6349915e708b16889",
-		// Deliberate request API addition: optional scalar provider with specialized-first semantics.
-		fetch_content: "cb07ea34fdef57db142d833438f9b586fadfc767f3c4df8763372fd3eb7774d0",
+		// Descriptions now advertise local PDF paths; request shapes are unchanged.
+		fetch_content: "9c3d42fd9179bbff3947dd4f98fea7048ceac3e88ff3dfbe7fa938b938006bcb",
 		get_search_content: "e1c7597fc085a811c0c6fcde365a96571c275c70b93a48206a38be06a7a45a5f",
 	};
 	const tools = registered({}).tools.filter(tool => tool.name !== "web_enable");

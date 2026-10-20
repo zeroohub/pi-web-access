@@ -1998,12 +1998,12 @@ export default function (pi: ExtensionAPI) {
 	if (fetchContentEnabled) pi.registerTool({
 		name: toolNames.fetchContent,
 		label: "Fetch Content",
-		description: `Fetch URL(s). Available modes: ${fetchModeDescription}. Direct image URLs return resized image content when supported by the selected mode. Supports YouTube transcripts, GitHub repositories, PDFs, and local videos when supported by the selected mode. ${fetchContentStorageNote}`,
+		description: `Fetch URL(s). Available modes: ${fetchModeDescription}. Direct image URLs return resized image content when supported by the selected mode. Supports YouTube transcripts, GitHub repositories, remote and local PDFs, and local videos when supported by the selected mode. ${fetchContentStorageNote}`,
 		promptSnippet:
-			"Use to fetch URL content, direct images, GitHub repos, and videos.",
+			"Use to fetch URL content, direct images, GitHub repos, local PDFs, and videos.",
 		parameters: Type.Object({
-			url: Type.Optional(Type.String({ description: "Single URL to fetch" })),
-			urls: Type.Optional(Type.Array(Type.String(), { description: "Multiple URLs (parallel)" })),
+			url: Type.Optional(Type.String({ description: "Single URL or local PDF/video path to fetch" })),
+			urls: Type.Optional(Type.Array(Type.String(), { description: "Multiple URLs or local PDF/video paths (parallel)" })),
 			provider: Type.Optional(StringEnum<FetchProviderSelection[]>(["auto", ...FETCH_PROVIDERS], { description: FETCH_PROVIDER_DESCRIPTION })),
 			forceClone: Type.Optional(Type.Boolean({
 				description: "Force cloning large GitHub repositories that exceed the size threshold",

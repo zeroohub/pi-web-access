@@ -1,10 +1,14 @@
-import { existsSync, readFileSync } from "node:fs";
+import { constants, existsSync, readFileSync } from "node:fs";
+import { open } from "node:fs/promises";
+import { extname } from "node:path";
+import { pathToFileURL } from "node:url";
+import { parseLocalFilePath, resolveLocalFilePath } from "./local-file.ts";
 import type TurndownService from "turndown";
 import pLimit from "p-limit";
 import { FETCH_PROVIDERS, type FetchProvider, type FetchProviderSelection, type ExtractionProvenance, type ExtractionAttempt } from "./fetch-provider.ts";
 import { activityMonitor } from "./activity.ts";
 import { extractRSCContent } from "./rsc-extract.ts";
-import { extractPDFToMarkdown, getPDFExtractionAttempts, PDFProcessingLimitError, isPDF, loadPDFConfig } from "./pdf-extract.ts";
+import { extractPDFToMarkdown, getPDFExtractionAttempts, PDFProcessingLimitError, isPDF, loadPDFConfig, type PDFExtractResult } from "./pdf-extract.ts";
 import { extractGitHub, parseGitHubUrl } from "./github-extract.ts";
 import { extractGitHubIssuePr, parseGitHubIssuePrUrl } from "./github-issue-pr.ts";
 import { isYouTubeURL, isYouTubeEnabled, extractYouTube, extractYouTubeFrame, extractYouTubeFrames, getYouTubeStreamInfo } from "./youtube-extract.ts";
@@ -654,6 +658,12 @@ async function dispatchContent(
 		}
 	}
 
+	const localPath = parseLocalFilePath(url);
+	const localPDFPath = localPath && extname(localPath).toLowerCase() === ".pdf" ? localPath : null;
+	if (localPDFPath && options?.mode === "raw") {
+		return { url, title: "", content: "", error: 'Unsupported content type in raw mode: application/pdf; retry without mode for Markdown, or with mode "answer" and a prompt' };
+	}
+
 	if (options?.authFetchProfile || options?.mode === "raw") {
 		try {
 			const result = await extractViaHttp(url, resolveFetchTimeoutMs(options), signal, options);
@@ -824,6 +834,23 @@ async function dispatchContent(
 		}
 
 		return { url, title: "", content: "", error: "Timestamp extraction only works with YouTube and local video files" };
+	}
+
+	if (localPDFPath) {
+		try {
+			const config = loadPDFConfig();
+			if (!config.enabled) return { url, title: "", content: "", error: "PDF extraction is disabled by pdf.enabled" };
+			const absolutePath = resolveLocalFilePath(localPDFPath);
+			if (!absolutePath) return { url, title: "", content: "", error: "Local PDF file not found or unreadable" };
+			const buffer = await readLocalPDFBuffer(absolutePath, config.maxSizeMB, signal);
+			const result = pdfExtractionResult(url, await extractPDFToMarkdown(buffer, pathToFileURL(absolutePath).href, { signal, lookup: options?.lookup }), options?.mode);
+			attempts.push(...(result.attempts ?? []));
+			return result;
+		} catch (err) {
+			const result = pdfExtractionFailure(url, err, signal);
+			attempts.push(...(result.attempts ?? []));
+			return errorMessage(err).startsWith("Local PDF") ? { ...result, error: errorMessage(err) } : result;
+		}
 	}
 
 	const localVideo = safeVideoInfo(url);
@@ -1186,6 +1213,76 @@ async function readResponseBufferWithLimit(
 	return combined.buffer;
 }
 
+function pdfExtractionResult(url: string, result: PDFExtractResult, mode?: ExtractOptions["mode"]): HttpExtractedContent {
+	return {
+		url,
+		title: result.title,
+		provider: null,
+		extractionProvider: result.extractionProvider,
+		terminal: true,
+		attempts: result.attempts.map(attempt => ({ provider: null, ...attempt })),
+		content: mode === "answer"
+			? result.content
+			: `PDF extracted and saved to: ${result.outputPath}\n\n${result.pages > 0 ? `Pages: ${result.pages}\n` : ""}Characters: ${result.chars}`,
+		error: null,
+	};
+}
+
+function pdfExtractionFailure(url: string, err: unknown, signal?: AbortSignal): HttpExtractedContent & { error: string } {
+	const attempts = getPDFExtractionAttempts(err).map(attempt => ({ provider: null, ...attempt }));
+	let message: string;
+	if (signal?.aborted || isAbortError(err)) message = "Aborted";
+	else if (err instanceof PDFProcessingLimitError || isFatalExtractionError(err)) message = errorMessage(err);
+	else {
+		// URL-only web adapters cannot bind their re-download to these bytes
+		// or enforce pdf.maxSizeMB, even where a PDF page cap is supported.
+		const engine = attempts.at(-1)?.extractionProvider;
+		const label = engine === "paddleocr" ? "PaddleOCR" : engine;
+		const status = errorMessage(err).match(/\bHTTP (\d{3})\b/)?.[1];
+		const diagnostic = label ? `: ${label}${status ? ` HTTP ${status}` : ""} extraction failed` : "";
+		message = `PDF extraction failed${diagnostic}. Web-provider fallback cannot preserve the validated PDF bytes and pdf.maxSizeMB size limit`;
+	}
+	return { url, title: "", content: "", error: message, attempts, terminal: true };
+}
+
+async function readLocalPDFBuffer(path: string, maxSizeMB: number, signal?: AbortSignal): Promise<ArrayBuffer> {
+	signal?.throwIfAborted();
+	const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK).catch(err => {
+		throw new Error(`Local PDF file is unreadable (${err.code ?? "file access failed"})`);
+	});
+	try {
+		const stat = await file.stat();
+		if (!stat.isFile()) throw new Error("Local PDF source must be a regular file");
+		const maxBytes = Math.floor(maxSizeMB * 1024 * 1024);
+		if (stat.size > maxBytes) throw pdfSizeLimitError(maxSizeMB);
+		const chunks: Uint8Array[] = [];
+		let total = 0;
+		while (true) {
+			signal?.throwIfAborted();
+			// Read at most one byte beyond the cap, even if the file grows after stat.
+			const chunk = new Uint8Array(Math.min(64 * 1024, maxBytes - total + 1));
+			const { bytesRead } = await file.read(chunk);
+			if (!bytesRead) break;
+			total += bytesRead;
+			if (total > maxBytes) throw pdfSizeLimitError(maxSizeMB);
+			chunks.push(chunk.subarray(0, bytesRead));
+		}
+		const buffer = new Uint8Array(total);
+		let offset = 0;
+		for (const chunk of chunks) {
+			buffer.set(chunk, offset);
+			offset += chunk.byteLength;
+		}
+		return buffer.buffer;
+	} catch (err) {
+		if (signal?.aborted || errorMessage(err).startsWith("Local PDF") || isNonRecoverableHttpError(errorMessage(err))) throw err;
+		const code = err instanceof Error && "code" in err ? String(err.code) : "file read failed";
+		throw new Error(`Local PDF file is unreadable (${code})`);
+	} finally {
+		await file.close();
+	}
+}
+
 function pdfSizeLimitError(maxSizeMB: number): Error {
 	return new Error(`PDF exceeds configured pdf.maxSizeMB limit (${maxSizeMB} MB)`);
 }
@@ -1372,38 +1469,15 @@ async function extractHttpResource(
 			try {
 				const buffer = await readPDFResponseBuffer(response, pdfConfig.maxSizeMB);
 				if (signal?.aborted) return abortedResult(url);
-				const result = await extractPDFToMarkdown(buffer, url, { signal, lookup: options?.lookup });
-				state.attempts = result.attempts.map(attempt => ({ provider: null, ...attempt }));
+				const result = pdfExtractionResult(url, await extractPDFToMarkdown(buffer, url, { signal, lookup: options?.lookup }), options?.mode);
+				state.attempts = result.attempts;
 				activityMonitor.logComplete(activityId, response.status);
-				return {
-					url,
-					title: result.title,
-					provider: null,
-					extractionProvider: result.extractionProvider,
-					terminal: true,
-					attempts: state.attempts,
-					content: options?.mode === "answer"
-						? result.content
-						: `PDF extracted and saved to: ${result.outputPath}\n\n${result.pages > 0 ? `Pages: ${result.pages}\n` : ""}Characters: ${result.chars}`,
-					error: null,
-				};
+				return result;
 			} catch (err) {
-				const attempts = getPDFExtractionAttempts(err).map(attempt => ({ provider: null, ...attempt }));
-				state.attempts = attempts;
-				let message: string;
-				if (signal?.aborted || isAbortError(err)) message = "Aborted";
-				else if (err instanceof PDFProcessingLimitError || isFatalExtractionError(err)) message = errorMessage(err);
-				else {
-					// URL-only web adapters cannot bind their re-download to these bytes
-					// or enforce pdf.maxSizeMB, even where a PDF page cap is supported.
-					const engine = attempts.at(-1)?.extractionProvider;
-					const label = engine === "paddleocr" ? "PaddleOCR" : engine;
-					const status = errorMessage(err).match(/\bHTTP (\d{3})\b/)?.[1];
-					const diagnostic = label ? `: ${label}${status ? ` HTTP ${status}` : ""} extraction failed` : "";
-					message = `PDF extraction failed${diagnostic}. Web-provider fallback cannot preserve the validated PDF bytes and pdf.maxSizeMB size limit`;
-				}
-				activityMonitor.logError(activityId, message);
-				return { url, title: "", content: "", error: message, attempts, terminal: true };
+				const result = pdfExtractionFailure(url, err, signal);
+				state.attempts = result.attempts;
+				activityMonitor.logError(activityId, result.error);
+				return result;
 			}
 		}
 
