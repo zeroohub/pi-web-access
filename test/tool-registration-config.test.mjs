@@ -78,7 +78,7 @@ test("default public execution tool definitions retain their compatibility hashe
 		web_search: "eb831762c218c50c43cedf765a984f6b1c46efb47ac9b7289dfbac4854112de4",
 		source_check: "48e69c75320f7a844a83bfe032c98b93ef11115e908831e6349915e708b16889",
 		// Descriptions now advertise local PDF paths; request shapes are unchanged.
-		fetch_content: "9c3d42fd9179bbff3947dd4f98fea7048ceac3e88ff3dfbe7fa938b938006bcb",
+		fetch_content: "da94e3649d86135e1923c69780ab7cde5002696c9899a29725bdafd8dadce1c6",
 		get_search_content: "e1c7597fc085a811c0c6fcde365a96571c275c70b93a48206a38be06a7a45a5f",
 	};
 	const tools = registered({}).tools.filter(tool => tool.name !== "web_enable");

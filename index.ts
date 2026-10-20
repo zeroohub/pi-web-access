@@ -2002,8 +2002,8 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet:
 			"Use to fetch URL content, direct images, GitHub repos, local PDFs, and videos.",
 		parameters: Type.Object({
-			url: Type.Optional(Type.String({ description: "Single URL or local PDF/video path to fetch" })),
-			urls: Type.Optional(Type.Array(Type.String(), { description: "Multiple URLs or local PDF/video paths (parallel)" })),
+			url: Type.Optional(Type.String({ description: "URL or local PDF/video path" })),
+			urls: Type.Optional(Type.Array(Type.String(), { description: "URLs or local PDF/video paths" })),
 			provider: Type.Optional(StringEnum<FetchProviderSelection[]>(["auto", ...FETCH_PROVIDERS], { description: FETCH_PROVIDER_DESCRIPTION })),
 			forceClone: Type.Optional(Type.Boolean({
 				description: "Force cloning large GitHub repositories that exceed the size threshold",
