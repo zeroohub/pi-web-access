@@ -3,3 +3,4 @@ bun.lock
 .pi/
 .pi-subagents/
 dist/
+.codegraph
