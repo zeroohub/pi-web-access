@@ -269,6 +269,12 @@ export function expandQueryString(query: unknown): string[] {
 	return [query];
 }
 
+/** Nonblank plural queries take precedence; an empty list must not hide query. */
+export function resolveSearchQueryList(params: { query?: unknown; queries?: unknown }): string[] {
+	const queries = Array.isArray(params.queries) ? normalizeQueryList(params.queries) : [];
+	return queries.length > 0 ? queries : normalizeQueryList(expandQueryString(params.query));
+}
+
 let extractModulePromise: Promise<typeof import("./extract.ts")> | undefined;
 export async function fetchAllContent(
 	urls: string[],
@@ -797,10 +803,7 @@ export function createWebToolCore(host: WebToolCoreHost): WebToolCoreInstance {
 		const model = validateSearchModelOverride(params.provider, params.model);
 		const { extensionContext: ctx, onUpdate } = call;
 		return runWithProxy(typeof params.proxy === "string" ? params.proxy : undefined, async () => {
-			const rawQueryList: unknown[] = Array.isArray(params.queries)
-				? params.queries
-				: (params.query !== undefined ? expandQueryString(params.query) : []);
-			const queryList = normalizeQueryList(rawQueryList);
+			const queryList = resolveSearchQueryList(params);
 			const recencyFilter = normalizeRecencyFilter(params.recencyFilter);
 
 			if (queryList.length === 0) {

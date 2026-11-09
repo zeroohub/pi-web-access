@@ -92,7 +92,7 @@ import { showUpgradeNotice } from "./upgrade-notice.ts";
 import {
 	createWebToolCore,
 	DEFAULT_TOOL_NAMES,
-	expandQueryString,
+	resolveSearchQueryList,
 	fetchAllContent,
 	fetchUncoveredContent,
 	getMaxInlineContentChars,
@@ -1488,10 +1488,7 @@ export default function (pi: ExtensionAPI) {
 			// Nested calls neither open the curator unless asked nor fetch content in the background.
 			const nested = nestedSearchCallIds.delete(callId);
 			return markToolError(await runWithProxy(typeof params.proxy === "string" ? params.proxy : undefined, async () => {
-				const rawQueryList: unknown[] = Array.isArray(params.queries)
-					? params.queries
-					: (params.query !== undefined ? expandQueryString(params.query) : []);
-				const queryList = normalizeQueryList(rawQueryList);
+				const queryList = resolveSearchQueryList(params);
 				const configWorkflow = loadConfigForExtensionInit().workflow;
 				const workflow = nested && params.workflow === undefined
 					? "none"
@@ -1759,10 +1756,7 @@ export default function (pi: ExtensionAPI) {
 
 		renderCall(args, theme) {
 			const input = args as { query?: unknown; queries?: unknown };
-			const rawQueryList: unknown[] = Array.isArray(input.queries)
-				? input.queries
-				: (input.query !== undefined ? expandQueryString(input.query) : []);
-			const queryList = normalizeQueryList(rawQueryList);
+			const queryList = resolveSearchQueryList(input);
 			if (queryList.length === 0) {
 				return new Text(theme.fg("toolTitle", theme.bold("search ")) + theme.fg("error", "(no query)"), 0, 0);
 			}

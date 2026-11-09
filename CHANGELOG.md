@@ -14,6 +14,10 @@ All notable changes to this project will be documented in this file.
 - Opt into basic Tavily markdown extraction by enabling `fetchRouting.allowRemoteHostedProviders` and selecting `provider: "tavily"` per call or adding `tavily` to `fetchRouting.providers` for automatic routing. Extraction reuses Tavily gateway configuration, credentials, and key rotation; the default automatic fetch route is unchanged.
 - Set `openaiSearchThinkingLevel` to control reasoning for OpenAI Responses search. Pi model thinking-level mappings are honored, including pinned and current-model searches; unset configuration and optional alpha search remain unchanged.
 
+### Fixed
+
+- A valid `web_search.query` is no longer hidden by an empty or whitespace-only `queries` array. Meaningful plural queries retain precedence, and Pi execution/rendering and shared MCP execution use the same selection rule.
+
 ## [0.47.0] - 2026-11-04
 
 ### Highlights
