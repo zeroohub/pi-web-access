@@ -410,7 +410,9 @@ test("shared fetch_content extracts a local PDF source and saves the existing Ma
 	assert.equal(source.provider, null);
 	assert.equal(source.extractionProvider, "unpdf");
 	assert.deepEqual(source.attempts, [{ provider: null, extractionProvider: "unpdf", outcome: "succeeded" }]);
-	assert.match(source.content, /PDF extracted and saved to:.*\n\nPages: 1\nCharacters: \d+/);
+	assert.match(source.content, /^PDF extracted and saved to:.*\n\n# report\.PDF/);
+	assert.match(source.content, /> Pages: 1/);
+	assert.equal(source.content.slice(source.content.indexOf("\n\n") + 2), saved);
 	assert.match(saved, /Local PDF source content/);
 	assert.match(saved, /^# .+\n\n> Source: /);
 	assert.deepEqual(calls, []);

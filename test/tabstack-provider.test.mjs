@@ -201,7 +201,13 @@ test("fetch_content uses Tabstack only when listed in fetchRouting.providers wit
 	`;
 	const listed = await child({ tabstackApiKey: "key", fetchRouting: { providers: ["http", "tabstack"], allowRemoteHostedProviders: true } }, script);
 	assert.deepEqual(listed.calls, ["https://example.com/app", EXTRACT]);
-	assert.deepEqual(listed.result, { url: "https://example.com/app", title: "Rendered", content: "# Tabstack rendered content", error: null });
+	assert.deepEqual(listed.result, {
+		url: "https://example.com/app", title: "Rendered", content: "# Tabstack rendered content", error: null,
+		provider: "tabstack", attempts: [
+			{ provider: "http", outcome: "failed", error: "HTTP extraction failed" },
+			{ provider: "tabstack", outcome: "succeeded" },
+		],
+	});
 
 	const defaultOrder = await child({ tabstackApiKey: "key", fetchRouting: { allowRemoteHostedProviders: true } }, script);
 	assert.ok(!defaultOrder.calls.includes(EXTRACT));

@@ -8,7 +8,7 @@ const fixtureUrl = new URL("./pdf-fixture.mjs", import.meta.url).href;
 function run(scenario = {}) {
 	const env = { ...process.env };
 	for (const key of Object.keys(env)) {
-		if (/^(TAVILY_|FIRECRAWL_|CRAWL4AI_|GEMINI_|GOOGLE_|PADDLEOCR_|DATALAB_|PARALLEL_|TINYFISH_|SEARCH1API_|QUERIT_|KAGI_|OLLAMA_|BRIGHTDATA_|PERPLEXITY_|PDF_ENDPOINT_)/.test(key)) delete env[key];
+		if (/^(TAVILY_|FIRECRAWL_|CRAWL4AI_|DEEPSEEK_|PI_DEEPSEEK_|EXA_|TABSTACK_|PI_TABSTACK_|GEMINI_|GOOGLE_|PADDLEOCR_|DATALAB_|PARALLEL_|TINYFISH_|SEARCH1API_|QUERIT_|KAGI_|OLLAMA_|BRIGHTDATA_|PERPLEXITY_|PDF_ENDPOINT_)/.test(key)) delete env[key];
 	}
 	delete env.PI_ALLOW_BROWSER_COOKIES;
 	delete env.FEYNMAN_ALLOW_BROWSER_COOKIES;
@@ -89,6 +89,9 @@ function run(scenario = {}) {
 				if (address === 'https://api.parallel.ai/v1/extract') return Response.json({results: [{url, title: 'Parallel page', excerpts: ['# Parallel page ' + 'Substantial content. '.repeat(40)], full_content: '# Parallel full content ' + 'Substantial content. '.repeat(40)}]});
 				if (address === 'https://search.parallel.ai/mcp') return Response.json({jsonrpc: '2.0', id: 1, result: {content: [{type: 'text', text: JSON.stringify({results: [{url, title: 'Parallel MCP page', full_content: '# Parallel MCP page'}]})}]}});
 				if (address === 'https://api.brightdata.com/request') return new Response('# Bright Data page');
+				if (address === 'https://api.deepseek.com/v1/tools/fetch') return Response.json({title: 'DeepSeek page', content: '# DeepSeek page'});
+				if (address === 'https://api.exa.ai/contents') return Response.json({results: [{url, title: 'Exa page', text: '# Exa page'}]});
+				if (address === 'https://api.tabstack.ai/v1/extract/markdown') return Response.json({content: '# Tabstack page', metadata: {title: 'Tabstack page'}});
 				if (address === 'http://127.0.0.1:9/parse') {
 					if (s.pdfEndpointDeadline) {
 						if (s.elapsedOnly) mock.timers.setTime(101);
@@ -749,6 +752,9 @@ test("extractContent permits every known ordinary route explicitly outside its a
 		["parallel-mcp", {}],
 		["brightdata", {brightdataApiKey: "synthetic-key", brightdataUnlockerZone: "synthetic-zone"}],
 		["gemini", {geminiApiKey: "synthetic-key"}],
+		["deepseek", {deepseekApiKey: "synthetic-key"}],
+		["exa", {exaApiKey: "synthetic-key"}],
+		["tabstack", {tabstackApiKey: "synthetic-key"}],
 	]) {
 		const {result, calls} = run({options: {provider}, config: {...config, fetchRouting: {providers: ["http"], allowRemoteHostedProviders: true}}});
 		assert.equal(result.error, null, provider);

@@ -27,7 +27,7 @@ test("MCP fetch_content registration accepts scalar providers and rejects invali
 	const { tools } = await client.listTools();
 	const schema = tools.find(tool => tool.name === "fetch_content").inputSchema;
 	assert.ok(schema.properties.provider, "MCP fetch_content must expose provider");
-	assert.deepEqual(schema.properties.provider.enum, ["auto", "http", "firecrawl", "crawl4ai", "jina", "tinyfish", "search1api", "querit", "kagi", "ollama", "parallel", "parallel-mcp", "brightdata", "gemini", "tavily"]);
+	assert.deepEqual(schema.properties.provider.enum, ["auto", "http", "firecrawl", "crawl4ai", "jina", "tinyfish", "search1api", "querit", "kagi", "ollama", "parallel", "parallel-mcp", "brightdata", "gemini", "deepseek", "exa", "tabstack", "tavily"]);
 	assert.match(schema.properties.provider.description, /specialized.*first/i);
 	assert.match(schema.properties.provider.description, /HTTP-first/);
 	assert.equal(Value.Check(schema, { url: "https://example.com" }), true);

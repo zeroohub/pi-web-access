@@ -246,10 +246,10 @@ const DEFAULT_REMOTE_CURATOR_TIMEOUT_SECONDS = 60;
 const MAX_CURATOR_TIMEOUT_SECONDS = 600;
 const MAX_SUMMARY_GENERATION_DEADLINE_MS = 600_000;
 const FETCH_MODE_DESCRIPTIONS: Record<FetchMode, string> = {
-	readable: "extract readable content as markdown",
-	raw: "return the exact textual body using direct HTTP only",
-	answer: "answer a prompt using only fetched content",
-	extract: "read typed values named in fields",
+	readable: "Markdown",
+	raw: "exact HTTP text",
+	answer: "prompt answer",
+	extract: "typed fields",
 };
 
 // Keep primary query indexes stable for curator slots, then interleave additional
@@ -2035,48 +2035,38 @@ export default function (pi: ExtensionAPI) {
 	if (fetchContentEnabled) pi.registerTool({
 		name: toolNames.fetchContent,
 		label: "Fetch Content",
-		description: `Fetch web pages, remote/local PDFs, GitHub repos, images, YouTube and local video, as the mode allows. ${fetchContentStorageNote}`,
+		description: `Fetch web, remote/local PDFs, repos, images and videos. ${fetchContentStorageNote}`,
 		promptSnippet:
 			`Use to fetch URL content, direct images, GitHub repos, local PDFs, and videos.${fetchModeConfig.allowedModes.includes("extract") ? ' For specific values (a price, version, date or limit), use mode "extract" with fields instead of reading the whole page.' : ""}`,
 		parameters: Type.Object({
-			url: Type.Optional(Type.String({ description: "URL or local PDF/video path" })),
-			urls: Type.Optional(Type.Array(Type.String(), { description: "URLs or local PDF/video paths" })),
+			url: Type.Optional(Type.String()),
+			urls: Type.Optional(Type.Array(Type.String())),
 			provider: Type.Optional(StringEnum<FetchProviderSelection[]>(["auto", ...FETCH_PROVIDERS], { description: FETCH_PROVIDER_DESCRIPTION })),
-			forceClone: Type.Optional(Type.Boolean({ description: "Clone GitHub repos over the size limit" })),
+			forceClone: Type.Optional(Type.Boolean({ description: "Clone large GitHub repos" })),
 			prompt: Type.Optional(Type.String({
-				description: fetchModeConfig.allowedModes.includes("answer")
-					? "Question for video analysis or answer mode"
-					: "Question for video analysis",
+				description: fetchModeConfig.allowedModes.includes("answer") ? "Video/answer question" : "Video question",
 			})),
 			mode: Type.Optional(StringEnum(fetchModeConfig.allowedModes, {
 				description: `${fetchModeDescription}.`,
 			})),
 			...(fetchModeConfig.allowedModes.includes("answer") ? {
-				answerModel: Type.Optional(Type.String({
-					description: "provider/model-id for answer mode",
-				})),
+				answerModel: Type.Optional(Type.String()),
 			} : {}),
 			...(fetchModeConfig.allowedModes.includes("extract") ? {
 				fields: Type.Optional(Type.Record(Type.String(), Type.String(), {
 					description: "For extract: name → \"type\" or \"type: what to find\"; types: text, number, integer, date, time, datetime, duration[.unit], list[.number|.date]",
 				})),
 			} : {}),
-			timestamp: Type.Optional(Type.String({
-				description: "Video frame time ('1:23:45') or range ('23:41-25:00'); needs ffmpeg",
-			})),
+			timestamp: Type.Optional(Type.String({ description: "Video time/range; needs ffmpeg" })),
 			frames: Type.Optional(Type.Integer({
 				minimum: 1,
 				maximum: 12,
-				description: "Frames over a range, 5s apart from one time, or over the video",
+				description: "Sample range or every 5s",
 			})),
-			model: Type.Optional(Type.String({ description: "Gemini model for video analysis" })),
-			auth: Type.Optional(Type.Union([Type.String(), Type.Boolean()], {
-				description: "authFetch profile name, or true for the only one",
-			})),
-			proxy: Type.Optional(Type.String({ description: "Proxy URL; omit by default; \"\" forces direct" })),
-			redirects: Type.Optional(StringEnum(["follow", "same-origin"], {
-				description: "Follow redirects or restrict to same-origin; configured restrictions cannot be weakened",
-			})),
+			model: Type.Optional(Type.String({ description: "Gemini video model" })),
+			auth: Type.Optional(Type.Union([Type.String(), Type.Boolean()], { description: "authFetch profile or true" })),
+			proxy: Type.Optional(Type.String({ description: "Proxy URL; omit by default; \"\" direct" })),
+			redirects: Type.Optional(StringEnum(["follow", "same-origin"], { description: "follow or same-origin; config wins" })),
 		}),
 		outputSchema: fetchContentOutputSchema,
 		exposure: toolExposure,

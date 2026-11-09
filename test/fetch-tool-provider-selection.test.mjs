@@ -184,7 +184,7 @@ test("MCP accepts explicit selection through the real shared core but keeps prov
 	assert.equal(result.content.length, 2);
 	assert.match(result.content[1].text, /Full content is stored as responseId/);
 	assert.deepEqual(calls.map(c => c.url), [PAGE, "https://api.tavily.com/extract"]);
-	assert.deepEqual(schema.properties.provider.enum, ["auto", "http", "firecrawl", "crawl4ai", "jina", "tinyfish", "search1api", "querit", "kagi", "ollama", "parallel", "parallel-mcp", "brightdata", "gemini", "tavily"]);
+	assert.deepEqual(schema.properties.provider.enum, ["auto", "http", "firecrawl", "crawl4ai", "jina", "tinyfish", "search1api", "querit", "kagi", "ollama", "parallel", "parallel-mcp", "brightdata", "gemini", "deepseek", "exa", "tabstack", "tavily"]);
 });
 
 test("shared auto and explicit http reuse their one HTTP response and report actual local extraction", () => {

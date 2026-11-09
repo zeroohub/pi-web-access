@@ -27,6 +27,10 @@ function runFetch(config, calls, replies = {}, { setUp = true, fails = false } =
 		input: `
 			import initializeExtension from ${JSON.stringify(indexUrl)};
 			import { makePdf } from ${JSON.stringify(pdfFixtureUrl)};
+			import { writeFile } from "node:fs/promises";
+			import { join } from "node:path";
+			const localPdf = join(process.env.PI_CODING_AGENT_DIR, "local-fees.pdf");
+			await writeFile(localPdf, new Uint8Array(makePdf("The annual fee is 42 dollars.")));
 			const replies = JSON.parse(process.env.REPLIES);
 			const clairicRequests = [];
 			let pageFetches = 0;
@@ -56,7 +60,8 @@ function runFetch(config, calls, replies = {}, { setUp = true, fails = false } =
 						return provider === "cloudflare-workers-ai" && process.env.CF_SET_UP ? { auth: { apiKey: ${JSON.stringify(CF_TOKEN)} }, env: { CLOUDFLARE_ACCOUNT_ID: "acct-1" } } : undefined;
 					},
 				};
-				const result = await fetchTool.execute("call", params, undefined, undefined, { modelRegistry });
+				const args = params.url === "$LOCAL_PDF" ? { ...params, url: localPdf } : params;
+				const result = await fetchTool.execute("call", args, undefined, undefined, { modelRegistry });
 				const stored = result.details.responseId
 					? (await tools.find((tool) => tool.name === "get_search_content").execute("get", { responseId: result.details.responseId, urlIndex: 0 })).content[0].text
 					: undefined;
@@ -137,6 +142,23 @@ test("a PDF is extracted from its text, not from the saved-file notice", () => {
 	assert.match(state, /The annual fee is 42 dollars\./);
 	assert.doesNotMatch(state, /PDF extracted and saved/);
 	assert.match(run.results[0].text, /\nfee: 42 \(0\.99\) from "The annual fee is 42 dollars\."\n/);
+});
+
+test("local PDFs retain upstream field extraction and source-engine provenance", () => {
+	const run = runFetch({ ...extractConfig, pdf: { provider: "unpdf" } }, [{ url: "$LOCAL_PDF", mode: "extract", fields: { fee: "number" } }], {
+		pdf: clairic({ fee: { type: "number", value: 42, confidence: 0.99 } }),
+	});
+	assert.equal(run.pageFetches, 0);
+	assert.equal(run.clairicRequests.length, 1);
+	const { state } = JSON.parse(run.clairicRequests[0].body);
+	assert.match(state, /The annual fee is 42 dollars\./);
+	assert.doesNotMatch(state, /PDF extracted and saved/);
+	const source = run.results[0].structured.urls[0];
+	assert.equal(source.provider, null);
+	assert.equal(source.extractionProvider, "unpdf");
+	assert.deepEqual(source.attempts, [{ provider: null, extractionProvider: "unpdf", outcome: "succeeded" }]);
+	assert.equal(source.extraction.fields.fee.value, 42);
+	assert.match(run.results[0].stored, /The annual fee is 42 dollars\./);
 });
 
 test("field names are plain keys, including __proto__", () => {

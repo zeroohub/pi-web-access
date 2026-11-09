@@ -325,7 +325,7 @@ export function getMaxInlineContentChars(config = loadConfig()): number {
 }
 
 export function stripThumbnails(results: ExtractedContent[]): ExtractedContent[] {
-	return results.map(({ thumbnail, frames, ...rest }) => rest);
+	return results.map(({ thumbnail: _thumbnail, frames: _frames, ...rest }) => rest);
 }
 
 function searchStructuredContent(responseId: string, fetchId: string | null, results: QueryResultData[]): WebSearchStructuredContent {

@@ -76,8 +76,8 @@ test("default public execution tool definitions retain their compatibility hashe
 	const expected = {
 		web_search: "b596687b2b7ec2c7e54b7bce3454c15f40f5ec502e9501d00517a2798796c72c",
 		source_check: "9e1c44321d9a277dc31ce6df4ca309b77126ec5dd3c6967b0a03d5cb82be856f",
-		// Descriptions now advertise local PDF paths; request shapes are unchanged.
-		fetch_content: "da94e3649d86135e1923c69780ab7cde5002696c9899a29725bdafd8dadce1c6",
+		// v0.47 compact metadata plus custom fetch providers/local PDFs, within the original size budget.
+		fetch_content: "b61f6a3ee78fe550996b3540cf17339fbb9bbe9994ecf0a00c598dc324866185",
 		get_search_content: "0671f28d0815f76acaa0afc5267aac8686ea4eaa46978f35bcd674ee6446f30a",
 	};
 	const tools = registered({}).tools.filter(tool => tool.name !== "web_enable");
@@ -225,7 +225,7 @@ test("README documents registration gates and toolNames", () => {
 test("fetch_content Pi registration offers scalar ordinary providers after specialized dispatch", () => {
 	const schema = registeredTool({}, "fetch_content").parameters.properties.provider;
 	assert.ok(schema, "fetch_content must expose provider");
-	assert.deepEqual(schema.enum, ["auto", "http", "firecrawl", "crawl4ai", "jina", "tinyfish", "search1api", "querit", "kagi", "ollama", "parallel", "parallel-mcp", "brightdata", "gemini", "tavily"]);
+	assert.deepEqual(schema.enum, ["auto", "http", "firecrawl", "crawl4ai", "jina", "tinyfish", "search1api", "querit", "kagi", "ollama", "parallel", "parallel-mcp", "brightdata", "gemini", "deepseek", "exa", "tabstack", "tavily"]);
 	assert.match(schema.description, /specialized.*first/i);
 	assert.match(schema.description, /HTTP-first/);
 	assert.match(schema.description, /raw.*auth.*HTTP-only/i);

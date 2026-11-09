@@ -25,4 +25,4 @@ export type ExtractionProvenance = {
 	attempts?: ExtractionAttempt[];
 };
 
-export const FETCH_PROVIDER_DESCRIPTION = "Ordinary web-page provider for every URL. Enabled, eligible specialized extractors run first; recoverable specialized failures continue to the selected provider only when safety and resource controls can be preserved. Omit or use auto for HTTP-first automatic routing after specialized dispatch. An explicit provider is strict: do not accept ordinary HTTP page content or substitute another web-page provider. Resource-type discovery may still use guarded HTTP. Raw and authenticated fetching are HTTP-only; provider selection cannot override safety policies.";
+export const FETCH_PROVIDER_DESCRIPTION = "Web pages: specialized first; HTTP-first auto; explicit is strict; raw/auth HTTP-only.";
