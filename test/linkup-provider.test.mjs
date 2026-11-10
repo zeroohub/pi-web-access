@@ -253,7 +253,7 @@ test("Linkup preserves network fallback for header and response-body transport f
 	}
 });
 
-test("Linkup is exposed in Pi and MCP schemas and Curator, and obeys the provider allowlist", async () => {
+test("Linkup remains usable in legacy Pi calls, MCP and Curator under the provider allowlist", async () => {
 	const output = await child({ linkupApiKey: "k", webSearch: { allowedProviders: ["linkup"] } }, `
 		const tools = [];
 		(await import(${JSON.stringify(moduleUrl("index"))})).default({ registerTool(t) { tools.push(t); }, registerCommand() {}, registerShortcut() {}, on() {}, appendEntry() {} });
@@ -267,12 +267,16 @@ test("Linkup is exposed in Pi and MCP schemas and Curator, and obeys the provide
 		});
 		globalThis.fetch = async () => ${response([result()])};
 		const sourceCheck = await tools.find(t => t.name === "source_check").execute("call", { claim: "q", provider: "linkup" }, undefined, undefined, { modelRegistry: {} });
+		const searchTool = tools.find(t => t.name === "web_search");
+		const legacySearch = await searchTool.execute("legacy", { query: "q", provider: "linkup", workflow: "none" });
 		const { generateCuratorPage } = await import(${JSON.stringify(moduleUrl("curator-page"))});
 		const available = new Proxy({ all: false, linkup: true }, { get: (obj, key) => obj[key] ?? false });
 		const page = generateCuratorPage(["q"], "token", 20, available, "linkup", "linkup", [], null);
-		console.log(JSON.stringify({ mcpErrors, sourceProvider: sourceCheck.details.artifact.provider, schemas: tools.filter(t => ["web_search", "source_check"].includes(t.name)).map(t => t.parameters.properties.provider.description), button: page.includes('data-provider="linkup"'), label: page.includes('provider === "linkup") return "Linkup"') }));
+		console.log(JSON.stringify({ mcpErrors, searchProviderHidden: searchTool.parameters.properties.provider === undefined, searchProvider: legacySearch.structuredContent.queries[0].provider, sourceProvider: sourceCheck.details.artifact.provider, schemas: tools.filter(t => t.name === "source_check").map(t => t.parameters.properties.provider.description), button: page.includes('data-provider="linkup"'), label: page.includes('provider === "linkup") return "Linkup"') }));
 	`);
-	assert.equal(output.schemas.length, 2);
+	assert.equal(output.searchProviderHidden, true);
+	assert.equal(output.searchProvider, "linkup");
+	assert.equal(output.schemas.length, 1);
 	for (const description of output.schemas) assert.match(description, /Allowed: linkup\./);
 	assert.deepEqual(output.mcpErrors, []);
 	assert.equal(output.sourceProvider, "linkup");
