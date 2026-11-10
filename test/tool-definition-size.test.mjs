@@ -41,7 +41,9 @@ test("the default tool definitions stay within the per-request size budget", (t)
 	t.diagnostic(`total: ${total} chars (~${Math.round(total / 4)} tokens)`);
 	assert.ok(total <= 4400, `tool definitions total ${total} chars, budget 4400`);
 	for (const { definition } of tools.slice(0, 2)) {
-		assert.ok(JSON.stringify(definition.parameters.properties.provider).length <= 200, `${definition.name} provider schema is too large`);
+		const provider = definition.parameters.properties.provider;
+		if (definition.name === "web_search") assert.equal(provider, undefined);
+		else assert.ok(JSON.stringify(provider).length <= 200, `${definition.name} provider schema is too large`);
 	}
 	const unions = tools.flatMap(({ definition }) => Object.entries(definition.parameters.properties)
 		.filter(([, schema]) => schema.anyOf)

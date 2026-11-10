@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Pi's `web_search` declaration now exposes only `queries`, `numResults`, `recencyFilter`, and `domainFilter`. Advanced inputs remain available to compatible callers with their existing validation and behavior; error messages, defaults, MCP and the other tools are unchanged.
+
 ### Added
 
 - Support local PDF sources in `fetch_content` through absolute, `./`, `../`, and `file://` paths with a case-insensitive `.pdf` suffix. Reuse existing PDF engines, fallback, readable/answer output, input/page limits and actual-engine provenance without an origin HTTP request. MCP paths refer to server-side files. Configured remote PDF engines can upload local file bytes; `pdf.provider: "unpdf"` keeps PDF extraction on the machine. Raw mode remains unsupported for PDFs.

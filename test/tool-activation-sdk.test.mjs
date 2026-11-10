@@ -89,6 +89,7 @@ test("native Pi sends configured web schemas on the request immediately after ac
 	assert.match(requests[0].systemText, /call web_enable/i);
 	assert.deepEqual(requests[0].tools.map(tool => tool.name), ["web_enable"]);
 	assert.deepEqual(requests[1].tools.map(tool => tool.name), ["web_enable", "web_search", "source_check", "fetch_content", "get_search_content"]);
+	assert.deepEqual(Object.keys(requests[1].tools.find(tool => tool.name === "web_search").parameters.properties), ["queries", "numResults", "recencyFilter", "domainFilter"]);
 	assert.ok(requests[0].tools.reduce((sum, tool) => sum + JSON.stringify(tool).length, 0) <= 700);
 	assert.ok(requests[1].tools.reduce((sum, tool) => sum + JSON.stringify(tool).length, 0) <= 12_119);
 
@@ -98,6 +99,37 @@ test("native Pi sends configured web schemas on the request immediately after ac
 	const fetchOnly = await runNative({ tools: { webSearch: { enabled: false }, sourceCheck: { enabled: false }, getSearchContent: { enabled: false } } });
 	assert.deepEqual(fetchOnly[0].tools.map(tool => tool.name), ["web_enable"]);
 	assert.deepEqual(fetchOnly[1].tools.map(tool => tool.name), ["web_enable", "fetch_content"]);
+});
+
+test("native Pi uses configured search defaults with the hidden declaration and keeps legacy model errors", async () => {
+	await withNativeEnv({ toolActivation: "eager", provider: "openai", openaiApiKey: "synthetic-key", openaiSearchModel: "configured-search-default" }, async () => {
+		const originalFetch = globalThis.fetch;
+		const backendModels = [];
+		globalThis.fetch = async (target, init) => {
+			assert.equal(String(target), "https://api.openai.com/v1/responses");
+			backendModels.push(JSON.parse(init.body).model);
+			return Response.json({ output: [{ type: "web_search_call" }, { type: "message", content: [{ type: "output_text", text: "Synthetic search answer" }] }] });
+		};
+		let session;
+		try {
+			const { faux, requests, captureRequest, start } = nativeHarness();
+			let errors = [];
+			faux.setResponses([
+				context => { captureRequest(context); return fauxAssistantMessage(fauxToolCall("web_search", { queries: ["ordinary search"] }), { stopReason: "toolUse" }); },
+				context => { captureRequest(context); return fauxAssistantMessage(fauxToolCall("web_search", { query: "legacy", model: "", provider: "auto", workflow: "none" }), { stopReason: "toolUse" }); },
+				context => {
+					captureRequest(context);
+					errors = context.messages.filter(message => message.role === "toolResult" && message.isError).flatMap(message => message.content.filter(part => part.type === "text").map(part => part.text));
+					return fauxAssistantMessage("done");
+				},
+			]);
+			session = await start({ extensions: true, sessionManager: SessionManager.inMemory(root), reason: "startup", noTools: "builtin" });
+			await session.prompt("Exercise ordinary search and legacy argument handling");
+			assert.deepEqual(backendModels, ["configured-search-default"]);
+			assert.ok(errors.includes("model must be a non-empty model ID"));
+			for (const request of requests) assert.deepEqual(Object.keys(request.tools.find(tool => tool.name === "web_search").parameters.properties), ["queries", "numResults", "recencyFilter", "domainFilter"]);
+		} finally { session?.dispose(); globalThis.fetch = originalFetch; }
+	});
 });
 
 test("native Pi on a model without native tool additions starts with every web tool and no web_enable", async () => {

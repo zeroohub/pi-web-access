@@ -74,7 +74,8 @@ test("malformed config falls back during extension registration", () => {
 
 test("default public execution tool definitions retain their compatibility hashes", () => {
 	const expected = {
-		web_search: "b596687b2b7ec2c7e54b7bce3454c15f40f5ec502e9501d00517a2798796c72c",
+		// Pi search advertises four common inputs; the other tool definitions are unchanged.
+		web_search: "9504178bbcbb33e2d9b12532b021637e3a6c02e40c73bfd8cc56c3dc53374544",
 		source_check: "9e1c44321d9a277dc31ce6df4ca309b77126ec5dd3c6967b0a03d5cb82be856f",
 		// v0.47 compact metadata plus custom fetch providers/local PDFs, within the original size budget.
 		fetch_content: "b61f6a3ee78fe550996b3540cf17339fbb9bbe9994ecf0a00c598dc324866185",
@@ -87,12 +88,15 @@ test("default public execution tool definitions retain their compatibility hashe
 	])), expected);
 });
 
-test("web_search offers model only for allowed providers that support it", () => {
-	assert.equal(registeredTool({ webSearch: { allowedProviders: ["brave"] } }, "web_search").parameters.properties.model, undefined);
-	assert.equal(
-		registeredTool({ webSearch: { allowedProviders: ["brave", "xai"] } }, "web_search").parameters.properties.model.description,
-		"Model ID; needs provider xai",
-	);
+test("Pi web_search exposes only queries and common result filters", () => {
+	for (const config of [{}, { webSearch: { allowedProviders: ["brave"] } }, { webSearch: { allowedProviders: ["brave", "xai"] } }]) {
+		const tool = registeredTool(config, "web_search");
+		assert.deepEqual(Object.keys(tool.parameters.properties), ["queries", "numResults", "recencyFilter", "domainFilter"]);
+		assert.deepEqual(tool.parameters.required ?? [], [], "hiding must not introduce required fields");
+		assert.equal(Value.Check(tool.parameters, { queries: ["one query"] }), true);
+		assert.equal(Value.Check(tool.parameters, { query: "legacy query", provider: "auto", model: "" }), true);
+		assert.doesNotMatch(tool.promptSnippet, /\b(?:provider|model|workflow|proxy|category|includeContent)\b/);
+	}
 });
 
 test("search tools constrain numResults to integer values from 1 through 20", () => {

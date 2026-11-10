@@ -1,6 +1,7 @@
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Box, Text, truncateToWidth, type KeyId } from "@earendil-works/pi-tui";
 import { Type, type TOptional, type TString } from "typebox";
+import { validateToolArguments, type JsonObject } from "@earendil-works/pi-ai";
 import type { ExtractedContent } from "./extract.ts";
 import { normalizeFetchContentParams } from "./fetch-params.ts";
 import { FETCH_PROVIDERS, FETCH_PROVIDER_DESCRIPTION, type FetchProvider, type FetchProviderSelection } from "./fetch-provider.ts";
@@ -118,6 +119,7 @@ import {
 	type SummaryWorkflow,
 	type ToolNames,
 	type WebSearchCallOptions,
+	type WebSearchParams,
 	type WebSearchConfig,
 } from "./web-tool-core.ts";
 
@@ -1456,14 +1458,11 @@ export default function (pi: ExtensionAPI) {
 		widgetVisible = false;
 	});
 
-	if (webSearchEnabled) pi.registerTool({
+	// Keep the original schema for legacy calls while exposing only common search inputs.
+	const webSearchDefinition = {
 		name: toolNames.webSearch,
-		label: "Web Search",
-		prepareArguments: (args) => parseStringifiedArrays(args, ["queries", "domainFilter"]) as never,
 		description:
 			`Search the web for sources or answers.${getSearchContentEnabled ? ` Full results are stored for retrieval with ${toolNames.getSearchContent} by responseId.` : ""} Prefer 2-4 varied queries.`,
-		promptSnippet:
-			"Web research. Prefer {queries:[...]} with 2-4 varied angles; omit provider unless overriding the default.",
 		parameters: Type.Object({
 			query: Type.Optional(Type.String()),
 			queries: Type.Optional(Type.Array(Type.String(), { description: "Run concurrently (up to three at a time); vary the angle" })),
@@ -1481,10 +1480,21 @@ export default function (pi: ExtensionAPI) {
 			),
 			proxy: Type.Optional(Type.String({ description: "Proxy URL; omit by default (env proxy vars ignored); \"\" forces direct" })),
 		}),
+	};
+	if (webSearchEnabled) pi.registerTool({
+		...webSearchDefinition,
+		label: "Web Search",
+		prepareArguments: (args) => validateToolArguments(webSearchDefinition, {
+			type: "toolCall", id: "", name: toolNames.webSearch,
+			// SAFETY: The native validator in this call checks the full legacy payload.
+			arguments: parseStringifiedArrays(args, ["queries", "domainFilter"]) as JsonObject,
+		}) as never,
+		promptSnippet: "Web research. Prefer {queries:[...]} with 2-4 varied angles.",
+		parameters: Type.Pick(webSearchDefinition.parameters, ["queries", "numResults", "recencyFilter", "domainFilter"]),
 		outputSchema: webSearchOutputSchema,
 		exposure: toolExposure,
 
-		async execute(callId, params, signal, onUpdate, ctx) {
+		async execute(callId, params: WebSearchParams, signal, onUpdate, ctx) {
 			// Nested calls neither open the curator unless asked nor fetch content in the background.
 			const nested = nestedSearchCallIds.delete(callId);
 			return markToolError(await runWithProxy(typeof params.proxy === "string" ? params.proxy : undefined, async () => {

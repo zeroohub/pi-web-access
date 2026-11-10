@@ -205,6 +205,17 @@ fetch_content({ url: "/path/to/recording.mp4", prompt: "What error appears on sc
 
 Search the web via OpenAI, Brave, Parallel, TinyFish, Search1API, Searchinfinity, Querit, Tavily, Firecrawl, Jina, SERPdive, Kagi, Bocha, Ollama, AnySearch, XCrawl, Valyu, xAI, Mistral, Bright Data SERP, SerpBase, SerpApi, Serper, Serply, SearchApi, Outcrawl, Sofya, You.com, keyless Keenable, Ceramic, DeepSeek, Linkup, a 9router gateway, the Cloudflare Web Search API, explicit-only Tabstack Research, self-hosted SearXNG, explicit-only degoog, keyless DuckDuckGo, Exa, Perplexity AI, Gemini, or Kimi. The default `none` workflow makes no summary-generation model call and opens no curator/browser: it returns bounded raw results, identifies the provider used for each query, and stores the full results for retrieval by responseId. The selected search provider may itself be model-backed.
 
+Pi's model-facing search declaration exposes only `queries`, `numResults`, `recencyFilter`, and `domainFilter`. The other inputs are hidden from the model, not removed from compatible Pi calls. Existing validation, error messages, optionality, defaults and configured routing remain unchanged; MCP keeps its separate existing contract.
+
+For an ordinary Pi search:
+
+```typescript
+web_search({ queries: ["rust async programming"] })
+web_search({ queries: ["release notes"], recencyFilter: "month", domainFilter: ["github.com"] })
+```
+
+The following examples and table document the compatible full interface:
+
 ```typescript
 web_search({ query: "rust async programming" })
 web_search({ queries: ["query 1", "query 2"] })
@@ -231,7 +242,7 @@ web_search({ queries: ["query 1", "query 2"], workflow: "auto-summary" })
 | `category` | Exa only: restrict results to a category such as `publication` (research papers), `news`, or `company`; other providers ignore it. Each Exa source lists its published date and authors when Exa returns them, and `publication` results also list the citation count and DOI. Without an API key, if Exa's filtered search is unavailable, the category is added to the query instead |
 | `provider` | Omit it or pass `"auto"` to use the configured provider (auto-selects when no provider or routing is configured). `"all"` searches every eligible provider at once; [All providers](#all-providers) lists the explicit-only providers it skips. Otherwise one name (`openai`, `brave`, `parallel`, `parallel-mcp`, `tinyfish`, `search1api`, `searchinfinity`, `querit`, `tavily`, `you`, `firecrawl`, `jina`, `serpdive`, `kagi`, `bocha`, `ollama`, `anysearch`, `xcrawl`, `valyu`, `xai`, `mistral`, `brightdata`, `serpbase`, `serpapi`, `serper`, `serply`, `searchapi`, `outcrawl`, `sofya`, `baizhi`, `zai`, `keenable`, `ceramic`, `deepseek`, `linkup`, `ninerouter`, `cloudflare`, `tabstack`, `searxng`, `degoog`, `duckduckgo`, `exa`, `perplexity`, `gemini`, or `kimi`), or several comma-separated names such as `"brave,exa"` to search them at once. An unknown name fails before any request with an error that lists the valid names |
 | `includeContent` | Fetch full page content from sources in background |
-| `model` | Model ID for this call only, used instead of `openaiSearchModel`, `xaiSearchModel`, `mistralSearchModel`, or Gemini's `searchModel`. Requires `provider` set to exactly one of `openai`, `xai`, `mistral`, or `gemini`. A failure is reported as an error rather than retried with another model or provider, and Gemini uses only its API, never browser cookies. Listed only when `webSearch.allowedProviders` allows one of those providers; not available with `workflow: "summary-review"` or over MCP |
+| `model` | Model ID for this call only, used instead of `openaiSearchModel`, `xaiSearchModel`, `mistralSearchModel`, or Gemini's `searchModel`. Requires `provider` set to exactly one of `openai`, `xai`, `mistral`, or `gemini`. A failure is reported as an error rather than retried with another model or provider, and Gemini uses only its API, never browser cookies. Hidden from Pi's model-facing declaration, retained for compatible callers when permitted by `webSearch.allowedProviders`; not available with `workflow: "summary-review"` or over MCP |
 | `workflow` | `none` (skip curator; fresh-install default), `summary-review` (open curator and auto-generate a summary draft), or `auto-summary` (generate a summary without opening the curator) |
 | `proxy` | http(s) or socks proxy URL for every request in this call; `""` forces a direct connection. Rejected when `lockProxy` is set, unless it matches the configured proxy. `HTTP(S)_PROXY` env vars are ignored. See [Proxy](#proxy-proxy) |
 
